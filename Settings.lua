@@ -35,6 +35,27 @@ for _, def in ipairs(PRESET_STATE_DEFINITIONS) do
     PRESET_STATE_IDS[def.id] = true
 end
 
+-- Style id meaning "this state does nothing". Kept as a literal here (rather
+-- than calling ContextPresets.GetOffStyleId at file-parse time) so the defaults
+-- table below can be built regardless of module load order; it is asserted to
+-- match the controller's value the first time styles are normalized.
+local PRESET_STYLE_OFF = "off"
+
+-- Maps a style id to the localized string constant for its display name, used
+-- to label the per-state dropdown choices. Kept here next to the state list so
+-- adding a style is a one-line change. Unknown ids fall back to the raw id text
+-- so a newly-added controller style is still selectable before its string lands.
+local PRESET_STYLE_NAME_KEYS = {
+    off       = SI_BAV_SETTING_PRESET_STYLE_OFF_NAME,
+    subtle    = SI_BAV_SETTING_PRESET_STYLE_SUBTLE_NAME,
+    cinematic = SI_BAV_SETTING_PRESET_STYLE_CINEMATIC_NAME,
+    action    = SI_BAV_SETTING_PRESET_STYLE_ACTION_NAME,
+}
+
+local function StyleNameKey(styleId)
+    return PRESET_STYLE_NAME_KEYS[styleId] or tostring(styleId)
+end
+
 if PRESERVE_FPV_BETWEEN_ZONES == nil then
     PRESERVE_FPV_BETWEEN_ZONES = true
 end
@@ -53,7 +74,7 @@ end
 ---@field dynamicFovSmooth boolean
 ---@field presetsEnabled boolean
 ---@field presetIntensity number
----@field presetStates table<string, boolean>
+---@field presetStates table<string, string>
 ---@field presetRestoreSnapshot table|nil
 
 ---@type BAVSavedVars
@@ -74,12 +95,16 @@ local DEFAULT_SAVED_VARS = {
     dynamicFovSmooth = true,  -- glide FOV between zoom steps instead of snapping
     presetsEnabled = false,
     presetIntensity = 1.0,
+    -- Each state holds a STYLE id (not a boolean): "off" disables the state,
+    -- other ids ("subtle"/"cinematic"/"action") pick how strong its framing is.
+    -- All default to "off" so a fresh install applies nothing until the user
+    -- both enables presets and picks a style per state.
     presetStates = {
-        combat = false,
-        werewolf = false,
-        stealth = false,
-        mounted = false,
-        sprint = false,
+        combat = PRESET_STYLE_OFF,
+        werewolf = PRESET_STYLE_OFF,
+        stealth = PRESET_STYLE_OFF,
+        mounted = PRESET_STYLE_OFF,
+        sprint = PRESET_STYLE_OFF,
     },
     -- Runtime recovery (NOT a user setting): the player's own camera captured
     -- the moment a context preset first overrode it. Persisted so a /reloadui,
@@ -251,31 +276,78 @@ function Settings.GetPresetIntensity()
     return private.ClampNumber(tonumber(vars.presetIntensity) or 1.0, 0, 1)
 end
 
--- Returns the per-state enable map with every state present (defaults to false),
--- so callers and ContextPresets.Configure get a complete table.
+-- Lazily-built lookup of valid style ids -> true, plus the resolved off/default
+-- ids, sourced from ContextPresets so Settings never hardcodes the style list.
+-- Built on first use (not at file load) because ContextPresets may not be
+-- available yet at parse time depending on manifest order.
+local presetStyleLookup       -- { [styleId] = true } or nil until built
+local presetStyleOffId        -- resolved "off" id
+local presetStyleDefaultId    -- resolved default ("on") id
+
+local function EnsurePresetStyleInfo()
+    if presetStyleLookup then
+        return
+    end
+    presetStyleLookup = {}
+    presetStyleOffId = PRESET_STYLE_OFF
+    presetStyleDefaultId = PRESET_STYLE_OFF
+
+    local cp = addon.ContextPresets
+    if cp and cp.GetStyleIds then
+        for _, id in ipairs(cp.GetStyleIds()) do
+            presetStyleLookup[id] = true
+        end
+        presetStyleOffId = cp.GetOffStyleId and cp.GetOffStyleId() or PRESET_STYLE_OFF
+        presetStyleDefaultId = cp.GetDefaultStyleId and cp.GetDefaultStyleId() or presetStyleOffId
+    else
+        -- Fallback if the module isn't loaded: only the off id is known-valid.
+        presetStyleLookup[PRESET_STYLE_OFF] = true
+    end
+end
+
+-- Coerce a stored value into a valid style id. Accepts legacy booleans for the
+-- old toggle format: true -> the default style, false -> off. Anything unknown
+-- (nil, junk string, removed style) falls back to off so a state never applies
+-- an undefined profile.
+local function NormalizePresetStyle(value)
+    EnsurePresetStyleInfo()
+    if value == true then
+        return presetStyleDefaultId
+    elseif value == false or value == nil then
+        return presetStyleOffId
+    elseif type(value) == "string" and presetStyleLookup[value] then
+        return value
+    end
+    return presetStyleOffId
+end
+
+-- Returns the per-state style map with every state present (defaults to the off
+-- style), so callers and ContextPresets.Configure get a complete table. Legacy
+-- boolean values are migrated to style ids on read.
 function Settings.GetPresetStates()
     local vars = GetSavedVarsOrDefaults()
     local saved = type(vars.presetStates) == "table" and vars.presetStates or {}
     return {
-        combat   = NormalizeBoolean(saved.combat, false),
-        werewolf = NormalizeBoolean(saved.werewolf, false),
-        stealth  = NormalizeBoolean(saved.stealth, false),
-        mounted  = NormalizeBoolean(saved.mounted, false),
-        sprint   = NormalizeBoolean(saved.sprint, false),
+        combat   = NormalizePresetStyle(saved.combat),
+        werewolf = NormalizePresetStyle(saved.werewolf),
+        stealth  = NormalizePresetStyle(saved.stealth),
+        mounted  = NormalizePresetStyle(saved.mounted),
+        sprint   = NormalizePresetStyle(saved.sprint),
     }
 end
 
--- Returns a single preset state's enable flag (defaults to false). Used by the
--- per-state checkboxes so each getFunc avoids allocating the full state table.
+-- Returns a single preset state's style id (defaults to the off style). Used by
+-- the per-state dropdowns so each getFunc avoids allocating the full table.
 function Settings.GetPresetState(stateId)
     local vars = GetSavedVarsOrDefaults()
     local saved = type(vars.presetStates) == "table" and vars.presetStates or nil
-    return saved ~= nil and NormalizeBoolean(saved[stateId], false) or false
+    return NormalizePresetStyle(saved ~= nil and saved[stateId] or nil)
 end
 
--- Set a single preset state's enable flag and push the change to the module.
--- Unknown state ids are ignored so a stale UI reference can't corrupt savedvars.
-function Settings.SetPresetState(stateId, enabled)
+-- Set a single preset state's style id and push the change to the module.
+-- Unknown state ids are ignored so a stale UI reference can't corrupt savedvars;
+-- the value is normalized so only valid style ids are ever stored.
+function Settings.SetPresetState(stateId, style)
     local vars = Settings.GetSavedVars()
     if not vars then
         return
@@ -286,7 +358,7 @@ function Settings.SetPresetState(stateId, enabled)
     if vars.presetStates[stateId] == nil and not PRESET_STATE_IDS[stateId] then
         return
     end
-    vars.presetStates[stateId] = enabled and true or false
+    vars.presetStates[stateId] = NormalizePresetStyle(style)
     Settings.ApplyOptionalFeatureConfig()
 end
 
@@ -532,9 +604,10 @@ function Settings.RegisterSettingsPanel()
         return not Settings.IsDynamicFovEnabled()
     end
 
-    -- Build the per-state preset checkboxes from PRESET_STATE_DEFINITIONS so the
-    -- state list stays a single source of truth. Returned as a flat list that is
-    -- spliced directly into the Context Presets submenu below.
+    -- Build the per-state preset dropdowns from PRESET_STATE_DEFINITIONS so the
+    -- state list stays a single source of truth. Each state picks a STYLE (Off /
+    -- Subtle / Cinematic / Action) rather than a plain on/off toggle. Returned as
+    -- a flat list that is spliced directly into the Context Presets submenu below.
     local function BuildPresetStateControls()
         local controls = {
             {
@@ -545,16 +618,30 @@ function Settings.RegisterSettingsPanel()
                 reference = "BAVSettingsPresetStatesLabel",
             },
         }
+
+        -- Style id list + parallel display-name list, shared by every dropdown.
+        -- Built once here from ContextPresets so the choices always match the
+        -- styles the controller actually understands.
+        local cp = addon.ContextPresets
+        local styleIds = (cp and cp.GetStyleIds)
+            and cp.GetStyleIds() or { PRESET_STYLE_OFF }
+        local styleNames = {}
+        for i = 1, #styleIds do
+            styleNames[i] = GetString(StyleNameKey(styleIds[i]))
+        end
+
         for _, def in ipairs(PRESET_STATE_DEFINITIONS) do
             local stateId = def.id
             controls[#controls + 1] = {
-                type = "checkbox",
+                type = "dropdown",
                 name = GetString(def.nameKey),
                 tooltip = GetString(def.tooltipKey),
+                choices = styleNames,
+                choicesValues = styleIds,
                 getFunc = function() return Settings.GetPresetState(stateId) end,
                 setFunc = function(value) Settings.SetPresetState(stateId, value) end,
                 width = "half",
-                default = false,
+                default = PRESET_STYLE_OFF,
                 disabled = PresetsDisabled,
                 reference = def.reference,
             }

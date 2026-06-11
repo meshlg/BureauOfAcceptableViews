@@ -66,6 +66,11 @@ local strings = {
     [SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME] = "Спринт",
     [SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP] = "Применять пресет кадрирования для спринта при беге пешком.",
 
+    [SI_BAV_SETTING_PRESET_STYLE_OFF_NAME] = "Выключено",
+    [SI_BAV_SETTING_PRESET_STYLE_SUBTLE_NAME] = "Сдержанный",
+    [SI_BAV_SETTING_PRESET_STYLE_CINEMATIC_NAME] = "Кинематографичный",
+    [SI_BAV_SETTING_PRESET_STYLE_ACTION_NAME] = "Динамичный",
+
     [SI_BAV_DEBUG_LEVEL_OFF] = "Выключено",
     [SI_BAV_DEBUG_LEVEL_ERRORS] = "Ошибки",
     [SI_BAV_DEBUG_LEVEL_WARNINGS] = "Предупреждения",

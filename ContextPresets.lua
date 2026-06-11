@@ -280,14 +280,66 @@ local STATE_BUNDLES = {
 }
 
 -- ---------------------------------------------------------------------------
+-- Ready-made styles (per-state strength profiles)
+-- ---------------------------------------------------------------------------
+-- A "style" is the named preset a user picks per state from the settings
+-- dropdown. It is NOT a different set of offsets -- the direction of each
+-- bundle (combat widens, stealth tightens, ...) stays fixed so framing always
+-- suits the state. A style only scales how STRONG that framing is, as a
+-- multiplier on top of the global intensity. STYLE_OFF disables the state
+-- entirely (same as the old per-state "off" toggle).
+--
+-- Strengths above 1.0 (action) can push a bundle past its nominal target; that
+-- is intentional and safe -- CameraSettings clamps every write to the engine's
+-- accepted range, so an over-strong style degrades to the range edge instead of
+-- producing an invalid value.
+local STYLE_OFF       = "off"
+local STYLE_SUBTLE    = "subtle"
+local STYLE_CINEMATIC = "cinematic"
+local STYLE_ACTION    = "action"
+
+local STYLE_STRENGTH = {
+    [STYLE_OFF]       = 0,
+    [STYLE_SUBTLE]    = 0.5,
+    [STYLE_CINEMATIC] = 1.0,
+    [STYLE_ACTION]    = 1.5,
+}
+
+-- Ordered for the settings dropdown and any iteration. Off first so it reads as
+-- the neutral/disabled choice at the top of the list.
+local STYLE_IDS = {
+    STYLE_OFF,
+    STYLE_SUBTLE,
+    STYLE_CINEMATIC,
+    STYLE_ACTION,
+}
+
+-- The style a state takes when it is "on" but no specific style is known (e.g.
+-- migrating an old boolean `true` toggle). Cinematic == intensity 1.0, which is
+-- exactly the behavior the boolean toggle used to give.
+local DEFAULT_STYLE = STYLE_CINEMATIC
+
+-- Coerce any value to a known style id, falling back to STYLE_OFF. Booleans are
+-- intentionally NOT special-cased here (an old `true` is not a style); callers
+-- that need boolean migration map true->DEFAULT_STYLE before calling.
+local function NormalizeStyle(style)
+    if type(style) == "string" and STYLE_STRENGTH[style] ~= nil then
+        return style
+    end
+    return STYLE_OFF
+end
+
+-- ---------------------------------------------------------------------------
 -- Controller runtime state
 -- ---------------------------------------------------------------------------
--- All inert until Configure{enabled=true}. enabledStates is the per-state user
--- toggle map; intensity scales every bundle (0 = no effect, 1 = full bundle).
+-- All inert until Configure{enabled=true}. stateStyles is the per-state user
+-- choice map ([stateId] = style id; STYLE_OFF means the state is disabled).
+-- intensity is the global multiplier applied on top of each style's strength
+-- (0 = no effect, 1 = full style strength).
 local controller = {
     enabled       = false,
     intensity     = 1.0,
-    enabledStates = {},      -- [stateId] = true/false
+    stateStyles   = {},      -- [stateId] = style id (defaults to STYLE_OFF)
     activeState   = STATE_DEFAULT,
     physical      = {},      -- [stateId] = true while physically in that state
     restoreSlot   = "ContextPresets.controllerRestore",
@@ -341,17 +393,28 @@ local function Clamp(value, minValue, maxValue)
     return value
 end
 
+-- The effective style id chosen for a state (STYLE_OFF when unset/disabled).
+local function StyleForState(stateId)
+    return NormalizeStyle(controller.stateStyles[stateId])
+end
+
 -- Build the concrete preset to apply for a state, given the live snapshot and
--- the current intensity. Offsets are added to the snapshot and scaled by
--- intensity; *Target values blend from the snapshot toward the target by
--- intensity. Returns a fresh preset table carrying only the keys it sets.
+-- the current intensity. Offsets are added to the snapshot and scaled by the
+-- effective strength (global intensity * the state's chosen style strength);
+-- *Target values blend from the snapshot toward the target by that strength.
+-- A state set to STYLE_OFF resolves to strength 0 and yields no preset. Returns
+-- a fresh preset table carrying only the keys it sets, or nil when nothing to do.
 local function ResolveBundle(stateId, snapshot)
     local bundle = STATE_BUNDLES[stateId]
     if not bundle or type(snapshot) ~= "table" then
         return nil
     end
 
-    local k = Clamp(controller.intensity, 0, 1)
+    local styleStrength = STYLE_STRENGTH[StyleForState(stateId)] or 0
+    local k = Clamp(controller.intensity, 0, 1) * styleStrength
+    if k <= 0 then
+        return nil
+    end
     local preset = {}
 
     if bundle.distanceOffset ~= nil and snapshot.distance ~= nil then
@@ -376,11 +439,11 @@ end
 -- State resolution + transitions
 -- ---------------------------------------------------------------------------
 
--- Pick the highest-priority state that is both physically active and enabled by
--- the user. Falls back to STATE_DEFAULT when nothing qualifies.
+-- Pick the highest-priority state that is both physically active and given a
+-- non-Off style by the user. Falls back to STATE_DEFAULT when nothing qualifies.
 local function ResolveActiveState()
     for _, stateId in ipairs(STATE_PRIORITY) do
-        if controller.physical[stateId] and controller.enabledStates[stateId] then
+        if controller.physical[stateId] and StyleForState(stateId) ~= STYLE_OFF then
             return stateId
         end
     end
@@ -527,6 +590,30 @@ function ContextPresets.GetActiveState()
     return controller.activeState
 end
 
+-- Returns the list of selectable style ids in display order, so the settings
+-- panel can build its per-state dropdowns without hardcoding the same list
+-- (keeping ContextPresets the single source of truth for what styles exist).
+function ContextPresets.GetStyleIds()
+    local copy = {}
+    for i = 1, #STYLE_IDS do
+        copy[i] = STYLE_IDS[i]
+    end
+    return copy
+end
+
+-- The style id a state takes when it is "on" but unspecified -- exposed so the
+-- migration path in Settings maps a legacy boolean `true` to the same style the
+-- controller uses internally.
+function ContextPresets.GetDefaultStyleId()
+    return DEFAULT_STYLE
+end
+
+-- The style id meaning "disabled" -- exposed so Settings can treat it as the
+-- neutral choice without hardcoding the string.
+function ContextPresets.GetOffStyleId()
+    return STYLE_OFF
+end
+
 -- Turn the whole feature on or off. Turning OFF unregisters every event, stops
 -- sprint polling, restores the player's snapshot, and clears runtime state so
 -- the module touches nothing further. Turning ON registers events and does an
@@ -541,8 +628,8 @@ local function SetEnabled(enabled)
     if enabled then
         controller.enabled = true
         RegisterStateEvents()
-        -- Sprint polling only runs when sprint is one of the enabled states.
-        if controller.enabledStates[STATE_SPRINT] then
+        -- Sprint polling only runs when sprint has a non-Off style selected.
+        if StyleForState(STATE_SPRINT) ~= STYLE_OFF then
             StartSprintPolling()
         end
         Reevaluate()
@@ -559,7 +646,10 @@ end
 -- Apply a configuration table, typically mirrored from SavedVariables:
 --   enabled       boolean
 --   intensity     number 0..1
---   states        { combat=bool, werewolf=bool, stealth=bool, mounted=bool, sprint=bool }
+--   states        { combat=<style>, werewolf=<style>, ... } where each value is
+--                  a style id ("off"/"subtle"/"cinematic"/"action"). For
+--                  backward compatibility a boolean is accepted: true maps to
+--                  the default style, false to "off".
 -- Unspecified fields are left unchanged. Safe to call repeatedly; it diffs and
 -- only re-evaluates when something that affects the active state changed.
 function ContextPresets.Configure(options)
@@ -571,13 +661,21 @@ function ContextPresets.Configure(options)
 
     if type(options.states) == "table" then
         for _, stateId in ipairs(STATE_PRIORITY) do
-            if options.states[stateId] ~= nil then
-                controller.enabledStates[stateId] = options.states[stateId] and true or false
+            local choice = options.states[stateId]
+            if choice ~= nil then
+                -- Accept legacy booleans (true => default style, false => off)
+                -- as well as explicit style ids.
+                if choice == true then
+                    choice = DEFAULT_STYLE
+                elseif choice == false then
+                    choice = STYLE_OFF
+                end
+                controller.stateStyles[stateId] = NormalizeStyle(choice)
             end
         end
-        -- Sprint polling must follow the sprint toggle while already enabled.
+        -- Sprint polling must follow the sprint style while already enabled.
         if controller.enabled then
-            if controller.enabledStates[STATE_SPRINT] then
+            if StyleForState(STATE_SPRINT) ~= STYLE_OFF then
                 StartSprintPolling()
             else
                 StopSprintPolling()
@@ -588,7 +686,7 @@ function ContextPresets.Configure(options)
     if options.enabled ~= nil then
         SetEnabled(options.enabled)
     elseif controller.enabled then
-        -- Re-apply with possibly-new intensity / toggles.
+        -- Re-apply with possibly-new intensity / styles.
         controller.activeState = STATE_DEFAULT  -- force ApplyState to recompute
         RestoreAndForget()
         Reevaluate()
@@ -702,7 +800,7 @@ end
 --   hasRestoreSnapshot  a pre-preset snapshot is currently captured
 --   slotCount       number of live scratch slots (should stay tiny; growth = leak)
 --   sprintPolling   sprint OnUpdate timer is currently registered
---   sprintEnabled   sprint is among the user-enabled states
+--   sprintEnabled   sprint has a non-Off style selected
 function ContextPresets.GetDiagnostics()
     local slotCount = 0
     for _ in pairs(slots) do
@@ -715,6 +813,6 @@ function ContextPresets.GetDiagnostics()
         hasRestoreSnapshot = ContextPresets.HasCapture(RESTORE_SLOT),
         slotCount          = slotCount,
         sprintPolling      = controller.polling,
-        sprintEnabled      = controller.enabledStates[STATE_SPRINT] and true or false,
+        sprintEnabled      = StyleForState(STATE_SPRINT) ~= STYLE_OFF,
     }
 end

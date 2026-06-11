@@ -66,6 +66,11 @@ local strings = {
     SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME = "Sprinting",
     SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP = "Apply the sprint framing preset while sprinting on foot.",
 
+    SI_BAV_SETTING_PRESET_STYLE_OFF_NAME = "Off",
+    SI_BAV_SETTING_PRESET_STYLE_SUBTLE_NAME = "Subtle",
+    SI_BAV_SETTING_PRESET_STYLE_CINEMATIC_NAME = "Cinematic",
+    SI_BAV_SETTING_PRESET_STYLE_ACTION_NAME = "Action",
+
     SI_BAV_DEBUG_LEVEL_OFF = "Off",
     SI_BAV_DEBUG_LEVEL_ERRORS = "Errors",
     SI_BAV_DEBUG_LEVEL_WARNINGS = "Warnings",
