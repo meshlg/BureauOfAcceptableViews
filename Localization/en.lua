@@ -215,6 +215,7 @@ local strings = {
     SI_BAV_SELFCHECK_SPRINT_POLL_LEAK = "Sprint polling is running while sprint presets are off (timer leak).",
     SI_BAV_SELFCHECK_TRANSITION_LEAK = "A transition glide is still running while presets are off (updater leak).",
     SI_BAV_SELFCHECK_FOV_GLIDE_LEAK = "A transition FOV glide is still running while presets are off (updater leak).",
+    SI_BAV_SELFCHECK_COALESCE_LEAK = "A state-change coalesce timer is still armed while presets are off (timer leak).",
     SI_BAV_SELFCHECK_SLOT_LEAK = "Camera scratch slots have grown to %d (possible leak).",
     SI_BAV_SELFCHECK_FOOTPRINT_GROWTH = "BAV's own data grew by %d entries since the last check (now %d). Watch for a leak.",
     SI_BAV_SELFCHECK_FOOTPRINT_REPORT = "BAV footprint: %d entries | since load: %+d | since last: %+d",

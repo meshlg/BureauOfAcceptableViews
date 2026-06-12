@@ -253,6 +253,18 @@ local STATE_PRIORITY = {
     STATE_SPRINT,
 }
 
+-- Numeric priority rank derived from STATE_PRIORITY: lower number = higher
+-- priority. Used by the anti-jitter coalescer to tell an escalation (entering a
+-- higher-priority state) from a de-escalation (dropping toward default). Any
+-- state not listed -- notably STATE_DEFAULT -- ranks below every special state.
+local STATE_RANK = {}
+for rank, stateId in ipairs(STATE_PRIORITY) do
+    STATE_RANK[stateId] = rank
+end
+local function PriorityRank(stateId)
+    return STATE_RANK[stateId] or math.huge
+end
+
 -- Fixed cinematic bundles, expressed as OFFSETS from the player's own camera
 -- (snapshotted at activation), not absolute values, so they layer on top of
 -- whatever the player already runs. Offsets are scaled by the global intensity
@@ -646,12 +658,102 @@ local function ApplyState(stateId)
     controller.activeState = stateId
 end
 
--- Recompute the active state from current inputs and apply if it changed.
-local function Reevaluate()
+-- ---------------------------------------------------------------------------
+-- State-change coalescing (anti-jitter)
+-- ---------------------------------------------------------------------------
+-- Rapid state events -- combat ending and restarting half a second later, a
+-- brief stealth blip, a quick dismount-then-fight -- would otherwise each kick
+-- off their own camera transition, so the framing visibly jerks back and forth.
+--
+-- We damp this with a "fast-escalate / slow-release" rule, keyed off state
+-- PRIORITY rather than elapsed time:
+--   * ESCALATION (resolved state outranks the active one -- e.g. entering
+--     combat, transforming) applies IMMEDIATELY, so reacting to danger stays
+--     responsive. Applying also cancels any pending release.
+--   * DE-ESCALATION (resolved state drops toward default / a lower-priority
+--     state -- e.g. combat ending) is DEFERRED by STATE_COALESCE_MS and
+--     re-resolved THEN. Because the physical flags update immediately, a quick
+--     out-and-back (combat ends, then restarts inside the window) re-escalates
+--     and the deferred release nets to a no-op (ApplyState skips when the
+--     resolved state already equals the active one). A drop that really settled
+--     applies exactly once when the window elapses.
+--
+-- This fixes the old time-anchored model, where a release after a long combat
+-- (longer than the window) applied instantly and never damped the very jitter
+-- it was meant to catch. Mirrors the self-tearing-updater discipline used
+-- elsewhere: the timer registers only while a release is pending and
+-- unregisters itself the moment it fires.
+local COALESCE_UPDATE_NAME = "BAV_ContextPresets_Coalesce"
+local STATE_COALESCE_MS = 2500
+
+-- pending gates the one-shot updater; nothing else runs while idle.
+local coalesce = {
+    pending = false,
+}
+
+-- Tear down the coalesce timer. Idempotent, so it doubles as the cancel path on
+-- disable / emergency restore.
+local function CancelCoalesce()
+    if coalesce.pending then
+        EVENT_MANAGER:UnregisterForUpdate(COALESCE_UPDATE_NAME)
+        coalesce.pending = false
+    end
+end
+
+-- Resolve and apply the active state RIGHT NOW. Cancels any pending release
+-- first so a deferred fire cannot double-apply or undo this application.
+local function ApplyResolvedNow()
+    CancelCoalesce()
     if not controller.enabled then
         return
     end
     ApplyState(ResolveActiveState())
+end
+
+-- One-shot coalesce updater: unregister immediately, then apply whatever state
+-- is current at fire time. A burst of flips during the release window collapses
+-- to this single evaluation -- and if the player re-escalated meanwhile, the
+-- resolved state already equals the active one and ApplyState is a no-op.
+local function OnCoalesceUpdate()
+    CancelCoalesce()
+    ApplyResolvedNow()
+end
+
+-- Arm the release timer, unless one is already pending (the in-flight timer will
+-- resolve the latest state when it fires, so re-arming would only push the
+-- settle point further out).
+local function ScheduleCoalesce(delayMs)
+    if coalesce.pending then
+        return
+    end
+    if delayMs < 0 then delayMs = 0 end
+    coalesce.pending = true
+    EVENT_MANAGER:RegisterForUpdate(COALESCE_UPDATE_NAME, delayMs, OnCoalesceUpdate)
+end
+
+-- Recompute the active state from current inputs and apply per the fast-
+-- escalate / slow-release rule: an escalation (or any change while a release is
+-- already pending, which re-resolves the latest state) applies immediately; a
+-- de-escalation toward a lower-priority state is deferred by STATE_COALESCE_MS
+-- so a quick out-and-back collapses to a no-op instead of jittering the camera.
+local function Reevaluate()
+    if not controller.enabled then
+        return
+    end
+
+    local resolved = ResolveActiveState()
+    if resolved == controller.activeState then
+        return
+    end
+
+    -- An escalation must win now; cancel any pending release and apply.
+    if PriorityRank(resolved) < PriorityRank(controller.activeState) then
+        ApplyResolvedNow()
+        return
+    end
+
+    -- De-escalation: defer so a fast re-escalation inside the window cancels it.
+    ScheduleCoalesce(STATE_COALESCE_MS)
 end
 
 -- ---------------------------------------------------------------------------
@@ -806,6 +908,7 @@ local function SetEnabled(enabled)
         UnregisterStateEvents()
         StopSprintPolling()
         StopTransition()
+        CancelCoalesce()
         RestoreAndForget()
         controller.activeState = STATE_DEFAULT
         controller.physical = {}
@@ -862,7 +965,9 @@ function ContextPresets.Configure(options)
     if options.enabled ~= nil then
         SetEnabled(options.enabled)
     elseif controller.enabled then
-        -- Re-apply with possibly-new intensity / styles.
+        -- Re-apply with possibly-new intensity / styles. Resetting activeState to
+        -- default makes any genuinely-active state an escalation, so Reevaluate
+        -- applies it immediately rather than deferring it as a release.
         controller.activeState = STATE_DEFAULT  -- force ApplyState to recompute
         RestoreAndForget()
         Reevaluate()
@@ -896,6 +1001,10 @@ function ContextPresets.EmergencyRestore()
     -- we are about to do. StopTransition is idempotent, so this is a no-op when
     -- nothing is gliding.
     StopTransition()
+
+    -- Drop any pending coalesce timer too, or it would fire after the panic
+    -- restore and re-apply a state we just handed back.
+    CancelCoalesce()
 
     local arbiter = addon.FovArbiter
     if arbiter and arbiter.ForceRelease() then
@@ -986,6 +1095,7 @@ end
 --   transitioning   a transition-glide updater is currently registered
 --   smooth          state transitions are eased (vs. instant snap)
 --   fovGliding      the arbiter's FOV glide updater is currently registered
+--   coalescePending a coalesce timer is armed (a state change is waiting to settle)
 function ContextPresets.GetDiagnostics()
     local slotCount = 0
     for _ in pairs(slots) do
@@ -1002,5 +1112,6 @@ function ContextPresets.GetDiagnostics()
         transitioning      = transition.active,
         smooth             = controller.smooth,
         fovGliding         = addon.FovArbiter and addon.FovArbiter.IsGliding() or false,
+        coalescePending    = coalesce.pending,
     }
 end

@@ -44,8 +44,11 @@ unsupported); context presets stay disabled until you switch them on.
 
 ### Context presets *(optional, off by default)*
 - Applies a fixed cinematic camera bundle for the state you are in — combat,
-  werewolf, stealth, mounted, or sprinting — and restores your own framing the
-  moment you leave it.
+  werewolf, stealth, mounted, or sprinting — and restores your own framing when
+  you leave it.
+- Entering a state is instant, but leaving one is briefly damped: a rapid
+  out-and-back (combat ending and restarting a moment later) keeps the cinematic
+  framing instead of snapping the camera around, so the view never jitters.
 - Exactly one state is active at a time, resolved by priority
   (werewolf → combat → stealth → mounted → sprint), so states never fight each
   other.

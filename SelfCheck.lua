@@ -257,6 +257,24 @@ local function CheckFovGlideLeak()
     return nil
 end
 
+-- The coalesce timer is a one-shot that re-resolves the active state after a
+-- burst of rapid state changes settles. It must unregister itself when it fires
+-- and is cancelled on disable. If it is still armed while the controller is
+-- disabled, the timer leaked -- the same standing cost the other timer checks
+-- guard against.
+local function CheckCoalesceLeak()
+    local presets = addon.ContextPresets
+    if not (presets and presets.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = presets.GetDiagnostics()
+    if diag.coalescePending and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_COALESCE_LEAK)
+    end
+    return nil
+end
+
 -- Ordered list of invariant checks. Add an entry and it is automatically part of
 -- every run and report.
 local INVARIANT_CHECKS = {
@@ -266,6 +284,7 @@ local INVARIANT_CHECKS = {
     CheckSlotLeak,
     CheckTransitionLeak,
     CheckFovGlideLeak,
+    CheckCoalesceLeak,
 }
 
 -- Run every invariant check, returning a list of localized problem strings (empty
