@@ -1,5 +1,5 @@
-## Title: Bureau of Acceptable Views |c6FCB9Fv1.1.11062342|r
-## Version: 1.1.11062342
+## Title: Bureau of Acceptable Views |c6FCB9Fv1.2.12061432|r
+## Version: 1.2.12061432
 ## AddOnVersion: 1111062342
 ## Author: |c6FCB9Fmeshlg|r
 ## APIVersion: 101050

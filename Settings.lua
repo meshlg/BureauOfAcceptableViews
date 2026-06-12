@@ -74,6 +74,7 @@ end
 ---@field dynamicFovSmooth boolean
 ---@field presetsEnabled boolean
 ---@field presetIntensity number
+---@field presetSmoothTransitions boolean
 ---@field presetStates table<string, string>
 ---@field presetRestoreSnapshot table|nil
 
@@ -95,6 +96,10 @@ local DEFAULT_SAVED_VARS = {
     dynamicFovSmooth = true,  -- glide FOV between zoom steps instead of snapping
     presetsEnabled = false,
     presetIntensity = 1.0,
+    -- Ease context-preset state changes (spatial framing + FOV) over a short
+    -- glide instead of snapping. Defaults ON, matching the Dynamic FOV smoothing
+    -- precedent; turning it off restores instant transitions.
+    presetSmoothTransitions = true,
     -- Each state holds a STYLE id (not a boolean): "off" disables the state,
     -- other ids ("subtle"/"cinematic"/"action") pick how strong its framing is.
     -- All default to "off" so a fresh install applies nothing until the user
@@ -276,6 +281,14 @@ function Settings.GetPresetIntensity()
     return private.ClampNumber(tonumber(vars.presetIntensity) or 1.0, 0, 1)
 end
 
+-- Whether context-preset state changes should glide rather than snap. Cosmetic;
+-- defaults on, mirroring Settings.IsDynamicFovSmooth. The nil fallback only
+-- matters if the key is somehow absent.
+function Settings.ArePresetTransitionsSmooth()
+    local vars = GetSavedVarsOrDefaults()
+    return NormalizeBoolean(vars.presetSmoothTransitions, true)
+end
+
 -- Lazily-built lookup of valid style ids -> true, plus the resolved off/default
 -- ids, sourced from ContextPresets so Settings never hardcodes the style list.
 -- Built on first use (not at file load) because ContextPresets may not be
@@ -451,6 +464,7 @@ function Settings.ApplyOptionalFeatureConfig()
         addon.ContextPresets.Configure({
             enabled   = Settings.ArePresetsEnabled(),
             intensity = Settings.GetPresetIntensity(),
+            smooth    = Settings.ArePresetTransitionsSmooth(),
             states    = Settings.GetPresetStates(),
         })
     end
@@ -924,6 +938,24 @@ function Settings.RegisterSettingsPanel()
             default = 100,
             disabled = function() return not Settings.ArePresetsEnabled() end,
             reference = "BAVSettingsPresetIntensity",
+        },
+        {
+            -- Purely cosmetic: ease state changes (spatial framing + FOV) over a
+            -- short glide instead of snapping. Greyed out unless presets are on,
+            -- mirroring the Dynamic FOV smoothing toggle above.
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_SMOOTH_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_SMOOTH_TOOLTIP),
+            getFunc = function() return Settings.ArePresetTransitionsSmooth() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.presetSmoothTransitions = value and true or false end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            disabled = function() return not Settings.ArePresetsEnabled() end,
+            width = "full",
+            default = true,
+            reference = "BAVSettingsPresetSmooth",
         },
             },
         },

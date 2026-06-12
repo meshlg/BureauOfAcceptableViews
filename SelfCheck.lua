@@ -222,6 +222,41 @@ local function CheckSlotLeak()
     return nil
 end
 
+-- The transition-glide updater is temporary: it must unregister itself the moment
+-- a transition lands. If a glide is still flagged active while the controller is
+-- disabled, the self-tearing updater leaked -- the same class of standing
+-- per-frame cost the sprint-poll check guards against.
+local function CheckTransitionLeak()
+    local presets = addon.ContextPresets
+    if not (presets and presets.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = presets.GetDiagnostics()
+    if diag.transitioning and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_TRANSITION_LEAK)
+    end
+    return nil
+end
+
+-- A transition FOV glide is driven by the arbiter and must stop the instant its
+-- transition lands (the controller pins the exact target and ends the hold). If
+-- a glide is still running while the controller is disabled, the glide updater
+-- leaked -- the same standing per-frame cost the transition-leak check guards.
+local function CheckFovGlideLeak()
+    local arbiter = addon.FovArbiter
+    local presets = addon.ContextPresets
+    if not (arbiter and arbiter.IsGliding and presets and presets.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = presets.GetDiagnostics()
+    if arbiter.IsGliding() and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_FOV_GLIDE_LEAK)
+    end
+    return nil
+end
+
 -- Ordered list of invariant checks. Add an entry and it is automatically part of
 -- every run and report.
 local INVARIANT_CHECKS = {
@@ -229,6 +264,8 @@ local INVARIANT_CHECKS = {
     CheckSnapshotCoherence,
     CheckSprintPolling,
     CheckSlotLeak,
+    CheckTransitionLeak,
+    CheckFovGlideLeak,
 }
 
 -- Run every invariant check, returning a list of localized problem strings (empty

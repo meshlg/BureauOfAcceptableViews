@@ -36,6 +36,11 @@ local ipairs  = ipairs
 local pairs   = pairs
 local type    = type
 
+-- Engine handles for the temporary transition-glide updater. Bound once at load
+-- like DynamicFov does; the updater itself only exists while a glide runs.
+local EVENT_MANAGER           = EVENT_MANAGER
+local GetGameTimeMilliseconds = GetGameTimeMilliseconds
+
 -- Logging helpers are generated in the core file and exported on private.
 -- Resolve them lazily so load order between files cannot break us.
 local function LogWarn(...)
@@ -339,6 +344,7 @@ end
 local controller = {
     enabled       = false,
     intensity     = 1.0,
+    smooth        = true,    -- ease state transitions (spatial glide + FOV glide)
     stateStyles   = {},      -- [stateId] = style id (defaults to STYLE_OFF)
     activeState   = STATE_DEFAULT,
     physical      = {},      -- [stateId] = true while physically in that state
@@ -450,6 +456,155 @@ local function ResolveActiveState()
     return STATE_DEFAULT
 end
 
+-- ---------------------------------------------------------------------------
+-- Smooth transition glide (self-tearing-down updater)
+-- ---------------------------------------------------------------------------
+-- A state change normally snaps the camera to the new bundle. This layer eases
+-- the *spatial* framing (distance + offsets) toward the target over a short
+-- window instead, using the exact same discipline as DynamicFov's FOV glide: a
+-- TEMPORARY RegisterForUpdate that unregisters itself the moment the transition
+-- completes, so there is no standing per-frame cost when nothing is moving.
+--
+-- FOV is deliberately NOT glided here (that is the separate FovArbiter pass):
+-- it keeps its current instant semantics -- pinned immediately on entry via
+-- BeginHold. The final frame defers to ContextPresets.Apply(target, isRestore)
+-- so a glided transition lands in EXACTLY the same camera state (every key, plus
+-- FOV ownership reconciliation) an instant Apply would have produced.
+
+-- Spatial keys eased frame-by-frame. FOV is excluded (arbitrated separately);
+-- non-animatable keys (headBob, screenShake, ...) are written once at the end by
+-- the authoritative Apply, so they snap rather than glide -- which is fine.
+local GLIDE_KEYS = {
+    DISTANCE_KEY,
+    "horizontalOffset",
+    "verticalOffset",
+    "shoulder",
+}
+
+local TRANSITION_UPDATE_NAME = "BAV_ContextPresets_Transition"
+local TRANSITION_DURATION_MS = 250
+
+-- All nil/false while no transition is running, so an idle controller carries no
+-- glide bookkeeping. active gates the temporary updater; the rest describe the
+-- in-flight glide and the authoritative landing target.
+local transition = {
+    active    = false,
+    startMs   = nil,
+    keys      = nil,   -- array of { key=, from=, to= }
+    target    = nil,   -- the target preset, for the final authoritative Apply
+    isRestore = false,
+}
+
+-- Tear down the per-frame updater and clear glide state. Idempotent, so it also
+-- serves as the cancel path when a new transition interrupts an in-flight one.
+local function StopTransition()
+    if transition.active then
+        EVENT_MANAGER:UnregisterForUpdate(TRANSITION_UPDATE_NAME)
+    end
+    transition.active    = false
+    transition.startMs   = nil
+    transition.keys      = nil
+    transition.target    = nil
+    transition.isRestore = false
+end
+
+-- Returns true while a transition glide is in progress (read by diagnostics).
+function ContextPresets.IsTransitioning()
+    return transition.active
+end
+
+-- Land the transition: clear glide state, then defer to the proven instant Apply
+-- so every key (including non-glided ones and FOV) reaches its exact target and
+-- FOV ownership is reconciled identically to a non-glided transition.
+local function FinishTransition()
+    local target    = transition.target
+    local isRestore = transition.isRestore
+    StopTransition()
+    ContextPresets.Apply(target or {}, isRestore)
+end
+
+-- Per-frame step. Eases each glide key from its captured start toward the target
+-- over TRANSITION_DURATION_MS; on (or past) the final frame it hands off to
+-- FinishTransition, which lands the exact values and stops the updater.
+local function OnTransitionUpdate()
+    if not transition.active or transition.startMs == nil then
+        StopTransition()
+        return
+    end
+
+    local t = (GetGameTimeMilliseconds() - transition.startMs) / TRANSITION_DURATION_MS
+    if t < 0 then t = 0 end
+
+    if t >= 1 then
+        FinishTransition()
+        return
+    end
+
+    for _, g in ipairs(transition.keys) do
+        CameraSettings.Set(g.key, g.from + (g.to - g.from) * t)
+    end
+end
+
+-- Begin (or retarget) a glide toward target. Cancels any in-flight glide first
+-- so an interrupted transition retargets from the LIVE camera rather than a
+-- stale start. When entering a state that pins FOV, the pin happens immediately
+-- (instant FOV semantics); the spatial keys glide. If there is nothing to glide
+-- (no readable spatial keys in the target) it falls straight through to the
+-- authoritative instant Apply.
+local function StartTransition(target, isRestore)
+    StopTransition()
+
+    local arbiter = addon.FovArbiter
+
+    -- When smoothing is off, every transition snaps: no spatial glide and an
+    -- instant FOV pin. Defer straight to the authoritative Apply so the camera
+    -- lands in exactly one step, identical to the pre-glide behavior.
+    if not controller.smooth then
+        ContextPresets.Apply(target or {}, isRestore)
+        return
+    end
+
+    -- Own and ease FOV over the same window as the spatial keys, on BOTH paths:
+    --   * entering a state that pins FOV -> glide toward the pinned value so FOV
+    --     and framing land together instead of FOV snapping ahead.
+    --   * restoring the snapshot -> take a TEMPORARY hold purely to own FOV
+    --     during the glide (so a zoom tick cannot fight it) and ease toward the
+    --     snapshot's FOV. FinishTransition -> Apply(target, isRestore) writes the
+    --     exact value; on restore its EndHold then releases this hold (cancelling
+    --     the glide) and reasserts dynamic FOV, so FOV still returns to its normal
+    --     owner -- just smoothly instead of snapping.
+    if type(target) == "table" and target[FOV_KEY] ~= nil
+        and arbiter and CameraSettings.IsSupported(FOV_KEY) then
+        arbiter.BeginHold("ContextPresets", target[FOV_KEY], TRANSITION_DURATION_MS)
+    end
+
+    local keys = {}
+    if type(target) == "table" then
+        for _, key in ipairs(GLIDE_KEYS) do
+            local to = target[key]
+            if to ~= nil and CameraSettings.IsSupported(key) then
+                local from, ok = CameraSettings.Get(key)
+                if ok and from ~= nil then
+                    keys[#keys + 1] = { key = key, from = from, to = to }
+                end
+            end
+        end
+    end
+
+    if #keys == 0 then
+        -- Nothing animatable: behave exactly like the instant path.
+        ContextPresets.Apply(target or {}, isRestore)
+        return
+    end
+
+    transition.keys      = keys
+    transition.target    = target
+    transition.isRestore = isRestore
+    transition.startMs   = GetGameTimeMilliseconds()
+    transition.active    = true
+    EVENT_MANAGER:RegisterForUpdate(TRANSITION_UPDATE_NAME, 0, OnTransitionUpdate)
+end
+
 -- Transition from the current active state to a newly resolved one. Snapshots
 -- the live camera on the first departure from default, applies the new state's
 -- bundle, and restores the snapshot when returning to default.
@@ -461,9 +616,18 @@ local function ApplyState(stateId)
     LogDebug("ContextPresets: state %s -> %s", controller.activeState, stateId)
 
     if stateId == STATE_DEFAULT then
-        -- Returning to baseline: put the original camera back exactly and drop
-        -- the snapshot (in-memory and persisted) -- no preset overrides now.
-        RestoreAndForget()
+        -- Returning to baseline: ease the camera back to the captured snapshot,
+        -- then drop it (in-memory + persisted). The glide's final frame defers to
+        -- Apply(snapshot, true), which releases any FOV hold and reasserts dynamic
+        -- FOV exactly as an instant restore would. StartTransition keeps its own
+        -- reference to the snapshot table, so clearing the capture right after is
+        -- safe. With nothing captured there is nothing to ease -- just clear any
+        -- stale persisted copy.
+        if ContextPresets.HasCapture(RESTORE_SLOT) then
+            StartTransition(slots[RESTORE_SLOT], true)
+            ContextPresets.ClearCapture(RESTORE_SLOT)
+        end
+        PersistRestoreSnapshot(nil)
         controller.activeState = STATE_DEFAULT
         return
     end
@@ -477,7 +641,7 @@ local function ApplyState(stateId)
     local snapshot = slots[RESTORE_SLOT]
     local preset = ResolveBundle(stateId, snapshot)
     if preset then
-        ContextPresets.Apply(preset)
+        StartTransition(preset, false)
     end
     controller.activeState = stateId
 end
@@ -634,10 +798,16 @@ local function SetEnabled(enabled)
         end
         Reevaluate()
     else
-        -- Tear down in the reverse order, then put the camera back.
+        -- Tear down in the reverse order, then put the camera back. Turning the
+        -- feature off should hand the camera back IMMEDIATELY, not over a glide:
+        -- cancel any in-flight transition and restore instantly. (ApplyState here
+        -- would start a glide that runs after enabled=false -- wrong UX and a
+        -- false "glide while disabled" signal.)
         UnregisterStateEvents()
         StopSprintPolling()
-        ApplyState(STATE_DEFAULT)
+        StopTransition()
+        RestoreAndForget()
+        controller.activeState = STATE_DEFAULT
         controller.physical = {}
         controller.enabled = false
     end
@@ -646,6 +816,8 @@ end
 -- Apply a configuration table, typically mirrored from SavedVariables:
 --   enabled       boolean
 --   intensity     number 0..1
+--   smooth        boolean -- ease state transitions (spatial + FOV glide) when
+--                  true; snap instantly when false.
 --   states        { combat=<style>, werewolf=<style>, ... } where each value is
 --                  a style id ("off"/"subtle"/"cinematic"/"action"). For
 --                  backward compatibility a boolean is accepted: true maps to
@@ -657,6 +829,10 @@ function ContextPresets.Configure(options)
 
     if options.intensity ~= nil then
         controller.intensity = Clamp(tonumber(options.intensity) or controller.intensity, 0, 1)
+    end
+
+    if options.smooth ~= nil then
+        controller.smooth = options.smooth and true or false
     end
 
     if type(options.states) == "table" then
@@ -714,6 +890,12 @@ end
 -- camera was already in the player's hands.
 function ContextPresets.EmergencyRestore()
     local didSomething = false
+
+    -- Cancel any in-flight transition glide FIRST. Its self-tearing updater would
+    -- otherwise keep easing spatial keys frame-by-frame and fight the recovery
+    -- we are about to do. StopTransition is idempotent, so this is a no-op when
+    -- nothing is gliding.
+    StopTransition()
 
     local arbiter = addon.FovArbiter
     if arbiter and arbiter.ForceRelease() then
@@ -801,6 +983,9 @@ end
 --   slotCount       number of live scratch slots (should stay tiny; growth = leak)
 --   sprintPolling   sprint OnUpdate timer is currently registered
 --   sprintEnabled   sprint has a non-Off style selected
+--   transitioning   a transition-glide updater is currently registered
+--   smooth          state transitions are eased (vs. instant snap)
+--   fovGliding      the arbiter's FOV glide updater is currently registered
 function ContextPresets.GetDiagnostics()
     local slotCount = 0
     for _ in pairs(slots) do
@@ -814,5 +999,8 @@ function ContextPresets.GetDiagnostics()
         slotCount          = slotCount,
         sprintPolling      = controller.polling,
         sprintEnabled      = StyleForState(STATE_SPRINT) ~= STYLE_OFF,
+        transitioning      = transition.active,
+        smooth             = controller.smooth,
+        fovGliding         = addon.FovArbiter and addon.FovArbiter.IsGliding() or false,
     }
 end
