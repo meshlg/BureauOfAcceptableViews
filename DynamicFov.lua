@@ -42,7 +42,7 @@ local ANIM_UPDATE_NAME          = "BAV_DynamicFovSmoothing"
 -- Total time (ms) for a smoothed FOV transition. Short enough to feel immediate,
 -- long enough to read as a glide rather than a snap. Each zoom step restarts the
 -- animation from the live FOV, so overlapping steps chain smoothly.
-local ANIM_DURATION_MS          = 250
+local ANIM_DURATION_MS          = 150
 
 -- Logging helpers are generated in the core file and exported on private.
 -- Resolve them lazily so load order between files cannot break us.

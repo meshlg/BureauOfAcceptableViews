@@ -53,7 +53,8 @@ unsupported); context presets stay disabled until you switch them on.
   (werewolf → combat → stealth → mounted → sprint), so states never fight each
   other.
 - A single global **intensity** slider scales every bundle, and each state has
-  its own enable toggle.
+  its own style choice plus an individual **intensity** slider that scales that
+  state on top of the global value (0% = no effect, 100% = full style strength).
 - Your pre-preset camera is snapshotted the first time a preset takes over and
   **persisted**, so a `/reloadui`, logout, or crash while a preset is active
   hands your real camera back next session instead of baking the preset's
@@ -156,15 +157,16 @@ the addon — it is here for the curious and for anyone reading the source.
 ### State priority — only one preset wins
 
 Context presets never fight each other. At most **one** state is active at a
-time, resolved top-down by priority and gated by each state's enable toggle:
-the first state that is both physically active *and* enabled wins.
+time, resolved top-down by priority and gated by each state's style choice:
+the first state that is both physically active *and* set to a style other than
+Off wins.
 
 ```
    physical state(s) active ──▶  resolve by priority  ──▶  one winner
                                  ┌───────────────────┐
-   highest  │  werewolf  ───────▶│ first active &     │
-            │  combat    ───────▶│ enabled state      │──▶ apply bundle
-            │  stealth   ───────▶│ wins; the rest     │
+   highest  │  werewolf  ───────▶│ first active state │
+            │  combat    ───────▶│ with a non-Off     │──▶ apply bundle
+            │  stealth   ───────▶│ style wins; rest   │
             │  mounted   ───────▶│ are ignored        │
    lowest   │  sprint    ───────▶│                    │──▶ none? → restore
                                  └───────────────────┘      your framing

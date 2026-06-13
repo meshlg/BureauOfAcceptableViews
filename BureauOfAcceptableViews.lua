@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.2.12061926",
+    version = "1.3.14060134",
     debugMode = 0,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 

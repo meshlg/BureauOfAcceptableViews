@@ -213,7 +213,8 @@ end
 -- ---------------------------------------------------------------------------
 -- Everything above is the stateless primitive layer. The controller below adds
 -- the actual feature: it watches the player's state (combat/werewolf/stealth/
--- mounted/sprint), picks the highest-priority ACTIVE state that the user has
+-- interaction/mounted/swimming/sprint), picks the highest-priority ACTIVE state
+-- that the user has
 -- enabled, and applies that state's cinematic bundle -- snapshotting the live
 -- camera the first time it changes anything so it can be restored exactly when
 -- the player returns to the default state or the feature is switched off.
@@ -230,12 +231,14 @@ end
 
 -- State identifiers. STATE_DEFAULT is the implicit "nothing special" state and
 -- has no bundle (its "bundle" is the restored original snapshot).
-local STATE_DEFAULT  = "default"
-local STATE_COMBAT   = "combat"
-local STATE_WEREWOLF = "werewolf"
-local STATE_STEALTH  = "stealth"
-local STATE_MOUNTED  = "mounted"
-local STATE_SPRINT   = "sprint"
+local STATE_DEFAULT     = "default"
+local STATE_COMBAT      = "combat"
+local STATE_WEREWOLF    = "werewolf"
+local STATE_STEALTH     = "stealth"
+local STATE_INTERACTION = "interaction"
+local STATE_MOUNTED     = "mounted"
+local STATE_SWIMMING    = "swimming"
+local STATE_SPRINT      = "sprint"
 
 -- Resolution order, highest priority first. The first state in this list that
 -- is both physically active AND enabled by the user becomes the active state.
@@ -249,7 +252,9 @@ local STATE_PRIORITY = {
     STATE_WEREWOLF,
     STATE_COMBAT,
     STATE_STEALTH,
+    STATE_INTERACTION,
     STATE_MOUNTED,
+    STATE_SWIMMING,
     STATE_SPRINT,
 }
 
@@ -282,13 +287,26 @@ local STATE_BUNDLES = {
         verticalOffset   = 0.10,
     },
     [STATE_STEALTH] = {
-        fovTarget        = 50,    -- tighten in for a focused, sneaky feel
-        distanceOffset   = -0.4,
-        shoulderTarget   = 0.65,  -- over-the-shoulder framing
+        fovTarget         = 50,    -- tighten in for a focused, sneaky feel
+        distanceOffset    = -0.4,
+        shoulderTarget    = 0.65,  -- over-the-shoulder framing
+        screenShakeTarget = 0.0,   -- steady, calm hold while sneaking
+        headBobTarget     = 0.0,   -- kill head bob for a focused first-person creep
+    },
+    [STATE_INTERACTION] = {
+        fovTarget         = 48,    -- tighten in toward the NPC for a dialogue close-up
+        distanceOffset    = -0.5,  -- pull in closer during the conversation
+        screenShakeTarget = 0.0,   -- hold steady while talking
     },
     [STATE_MOUNTED] = {
         fovTarget        = 58,
         distanceOffset   = 1.0,   -- show the mount
+        headBobTarget    = 0.0,   -- smooth ride: no first-person bobbing in the saddle
+    },
+    [STATE_SWIMMING] = {
+        fovTarget        = 62,    -- open up for an expansive underwater feel
+        distanceOffset   = 0.8,   -- pull back for a cinematic swimming shot
+        verticalOffset   = 0.08,
     },
     [STATE_SPRINT] = {
         fovTarget        = 61,    -- subtle speed-sense widening
@@ -352,17 +370,21 @@ end
 -- All inert until Configure{enabled=true}. stateStyles is the per-state user
 -- choice map ([stateId] = style id; STYLE_OFF means the state is disabled).
 -- intensity is the global multiplier applied on top of each style's strength
--- (0 = no effect, 1 = full style strength).
+-- (0 = no effect, 1 = full style strength). stateIntensities is an additional
+-- per-state multiplier ([stateId] = 0..1) that scales that one state on top of
+-- the global intensity; a missing entry means 1.0 (no per-state attenuation),
+-- so the effective strength is global * style * perState.
 local controller = {
-    enabled       = false,
-    intensity     = 1.0,
-    smooth        = true,    -- ease state transitions (spatial glide + FOV glide)
-    stateStyles   = {},      -- [stateId] = style id (defaults to STYLE_OFF)
-    activeState   = STATE_DEFAULT,
-    physical      = {},      -- [stateId] = true while physically in that state
-    restoreSlot   = "ContextPresets.controllerRestore",
-    polling       = false,
-    recovered     = false,   -- load-time snapshot recovery runs once per session
+    enabled         = false,
+    intensity       = 1.0,
+    smooth          = true,    -- ease state transitions (spatial glide + FOV glide)
+    stateStyles     = {},      -- [stateId] = style id (defaults to STYLE_OFF)
+    stateIntensities = {},     -- [stateId] = 0..1 per-state multiplier (defaults to 1.0)
+    activeState     = STATE_DEFAULT,
+    physical        = {},      -- [stateId] = true while physically in that state
+    restoreSlot     = "ContextPresets.controllerRestore",
+    polling         = false,
+    recovered       = false,   -- load-time snapshot recovery runs once per session
 }
 
 -- The named scratch slot used to stash the player's pre-preset camera. Reusing
@@ -416,12 +438,24 @@ local function StyleForState(stateId)
     return NormalizeStyle(controller.stateStyles[stateId])
 end
 
+-- The per-state intensity multiplier for a state, clamped to 0..1. A missing or
+-- non-numeric entry means 1.0 (no per-state attenuation), so states keep their
+-- full style strength until the user dials one down.
+local function IntensityForState(stateId)
+    local value = tonumber(controller.stateIntensities[stateId])
+    if value == nil then
+        return 1.0
+    end
+    return Clamp(value, 0, 1)
+end
+
 -- Build the concrete preset to apply for a state, given the live snapshot and
 -- the current intensity. Offsets are added to the snapshot and scaled by the
--- effective strength (global intensity * the state's chosen style strength);
--- *Target values blend from the snapshot toward the target by that strength.
--- A state set to STYLE_OFF resolves to strength 0 and yields no preset. Returns
--- a fresh preset table carrying only the keys it sets, or nil when nothing to do.
+-- effective strength (global intensity * the state's chosen style strength *
+-- the state's own intensity); *Target values blend from the snapshot toward the
+-- target by that strength. A state set to STYLE_OFF resolves to strength 0 and
+-- yields no preset. Returns a fresh preset table carrying only the keys it sets,
+-- or nil when nothing to do.
 local function ResolveBundle(stateId, snapshot)
     local bundle = STATE_BUNDLES[stateId]
     if not bundle or type(snapshot) ~= "table" then
@@ -429,7 +463,7 @@ local function ResolveBundle(stateId, snapshot)
     end
 
     local styleStrength = STYLE_STRENGTH[StyleForState(stateId)] or 0
-    local k = Clamp(controller.intensity, 0, 1) * styleStrength
+    local k = Clamp(controller.intensity, 0, 1) * styleStrength * IntensityForState(stateId)
     if k <= 0 then
         return nil
     end
@@ -448,6 +482,18 @@ local function ResolveBundle(stateId, snapshot)
     end
     if bundle.verticalOffset ~= nil and snapshot.verticalOffset ~= nil then
         preset.verticalOffset = snapshot.verticalOffset + bundle.verticalOffset * k
+    end
+    -- screenShake / headBob are absolute 0..1 settings, so they blend from the
+    -- snapshot toward a target by the effective strength (same semantics as
+    -- fovTarget). At strength 0 nothing is written; at full strength the value
+    -- lands on the target. CameraSettings clamps the result to the engine range.
+    if bundle.screenShakeTarget ~= nil and snapshot.screenShake ~= nil then
+        preset.screenShake = snapshot.screenShake
+            + (bundle.screenShakeTarget - snapshot.screenShake) * k
+    end
+    if bundle.headBobTarget ~= nil and snapshot.headBob ~= nil then
+        preset.headBob = snapshot.headBob
+            + (bundle.headBobTarget - snapshot.headBob) * k
     end
 
     return preset
@@ -795,6 +841,28 @@ local function OnWerewolfState(_, werewolf)
     SetPhysical(STATE_WEREWOLF, werewolf)
 end
 
+-- Swimming has dedicated enter/exit events (no polling needed): the engine
+-- fires EVENT_PLAYER_SWIMMING on entering water and EVENT_PLAYER_NOT_SWIMMING
+-- on leaving, so each just flips the physical flag.
+local function OnSwimmingState(_)
+    SetPhysical(STATE_SWIMMING, true)
+end
+
+local function OnNotSwimmingState(_)
+    SetPhysical(STATE_SWIMMING, false)
+end
+
+-- Interaction/dialogue is bracketed by EVENT_CHATTER_BEGIN (talking to an NPC,
+-- quest giver, etc.) and EVENT_CHATTER_END (the conversation closed), so the
+-- framing applies for the duration of the chatter window only.
+local function OnChatterBegin(_)
+    SetPhysical(STATE_INTERACTION, true)
+end
+
+local function OnChatterEnd(_)
+    SetPhysical(STATE_INTERACTION, false)
+end
+
 -- Sprint has no dedicated event, so we poll while the feature is enabled AND
 -- the sprint state is one the user actually toggled on -- otherwise we never
 -- start the timer, keeping overhead at zero for users who don't use it.
@@ -833,6 +901,10 @@ local function RegisterStateEvents()
     EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_STEALTH_STATE_CHANGED, OnStealthState)
     EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_MOUNTED_STATE_CHANGED, OnMountedState)
     EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_WEREWOLF_STATE_CHANGED, OnWerewolfState)
+    EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_PLAYER_SWIMMING, OnSwimmingState)
+    EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_PLAYER_NOT_SWIMMING, OnNotSwimmingState)
+    EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_BEGIN, OnChatterBegin)
+    EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_END, OnChatterEnd)
 end
 
 local function UnregisterStateEvents()
@@ -840,6 +912,10 @@ local function UnregisterStateEvents()
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_STEALTH_STATE_CHANGED)
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_MOUNTED_STATE_CHANGED)
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_WEREWOLF_STATE_CHANGED)
+    EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_PLAYER_SWIMMING)
+    EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_PLAYER_NOT_SWIMMING)
+    EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_BEGIN)
+    EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_END)
 end
 
 -- ---------------------------------------------------------------------------
@@ -925,6 +1001,9 @@ end
 --                  a style id ("off"/"subtle"/"cinematic"/"action"). For
 --                  backward compatibility a boolean is accepted: true maps to
 --                  the default style, false to "off".
+--   stateIntensities { combat=<0..1>, werewolf=<0..1>, ... } per-state multiplier
+--                  layered on top of the global intensity and the state's style
+--                  strength. A missing entry is treated as 1.0 (no attenuation).
 -- Unspecified fields are left unchanged. Safe to call repeatedly; it diffs and
 -- only re-evaluates when something that affects the active state changed.
 function ContextPresets.Configure(options)
@@ -958,6 +1037,15 @@ function ContextPresets.Configure(options)
                 StartSprintPolling()
             else
                 StopSprintPolling()
+            end
+        end
+    end
+
+    if type(options.stateIntensities) == "table" then
+        for _, stateId in ipairs(STATE_PRIORITY) do
+            local value = options.stateIntensities[stateId]
+            if value ~= nil then
+                controller.stateIntensities[stateId] = Clamp(tonumber(value) or 1.0, 0, 1)
             end
         end
     end

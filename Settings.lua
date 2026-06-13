@@ -22,9 +22,11 @@ local CONFIG_MIN_THIRD_PERSON_ZOOM = constants.CONFIG_MIN_THIRD_PERSON_ZOOM or 0
 local PRESET_STATE_DEFINITIONS = {
     { id = "combat",   nameKey = SI_BAV_SETTING_PRESET_STATE_COMBAT_NAME,   tooltipKey = SI_BAV_SETTING_PRESET_STATE_COMBAT_TOOLTIP,   reference = "BAVSettingsPresetStateCombat" },
     { id = "werewolf", nameKey = SI_BAV_SETTING_PRESET_STATE_WEREWOLF_NAME, tooltipKey = SI_BAV_SETTING_PRESET_STATE_WEREWOLF_TOOLTIP, reference = "BAVSettingsPresetStateWerewolf" },
-    { id = "stealth",  nameKey = SI_BAV_SETTING_PRESET_STATE_STEALTH_NAME,  tooltipKey = SI_BAV_SETTING_PRESET_STATE_STEALTH_TOOLTIP,  reference = "BAVSettingsPresetStateStealth" },
-    { id = "mounted",  nameKey = SI_BAV_SETTING_PRESET_STATE_MOUNTED_NAME,  tooltipKey = SI_BAV_SETTING_PRESET_STATE_MOUNTED_TOOLTIP,  reference = "BAVSettingsPresetStateMounted" },
-    { id = "sprint",   nameKey = SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME,   tooltipKey = SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP,   reference = "BAVSettingsPresetStateSprint" },
+    { id = "stealth",     nameKey = SI_BAV_SETTING_PRESET_STATE_STEALTH_NAME,     tooltipKey = SI_BAV_SETTING_PRESET_STATE_STEALTH_TOOLTIP,     reference = "BAVSettingsPresetStateStealth" },
+    { id = "interaction", nameKey = SI_BAV_SETTING_PRESET_STATE_INTERACTION_NAME, tooltipKey = SI_BAV_SETTING_PRESET_STATE_INTERACTION_TOOLTIP, reference = "BAVSettingsPresetStateInteraction" },
+    { id = "mounted",     nameKey = SI_BAV_SETTING_PRESET_STATE_MOUNTED_NAME,     tooltipKey = SI_BAV_SETTING_PRESET_STATE_MOUNTED_TOOLTIP,     reference = "BAVSettingsPresetStateMounted" },
+    { id = "swimming",    nameKey = SI_BAV_SETTING_PRESET_STATE_SWIMMING_NAME,    tooltipKey = SI_BAV_SETTING_PRESET_STATE_SWIMMING_TOOLTIP,    reference = "BAVSettingsPresetStateSwimming" },
+    { id = "sprint",      nameKey = SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME,      tooltipKey = SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP,      reference = "BAVSettingsPresetStateSprint" },
 }
 
 -- Valid context-preset state ids, used to guard SetPresetState against stale UI
@@ -76,6 +78,7 @@ end
 ---@field presetIntensity number
 ---@field presetSmoothTransitions boolean
 ---@field presetStates table<string, string>
+---@field presetStateIntensities table<string, number>
 ---@field presetRestoreSnapshot table|nil
 
 ---@type BAVSavedVars
@@ -108,8 +111,24 @@ local DEFAULT_SAVED_VARS = {
         combat = PRESET_STYLE_OFF,
         werewolf = PRESET_STYLE_OFF,
         stealth = PRESET_STYLE_OFF,
+        interaction = PRESET_STYLE_OFF,
         mounted = PRESET_STYLE_OFF,
+        swimming = PRESET_STYLE_OFF,
         sprint = PRESET_STYLE_OFF,
+    },
+    -- Per-state intensity multiplier (0..1) layered on top of the global
+    -- presetIntensity and the state's chosen style strength. All default to 1.0
+    -- so a state runs at its full style strength until the user dials it down;
+    -- an install that predates this key reads missing entries as 1.0 too, so the
+    -- behavior is unchanged on upgrade.
+    presetStateIntensities = {
+        combat = 1.0,
+        werewolf = 1.0,
+        stealth = 1.0,
+        interaction = 1.0,
+        mounted = 1.0,
+        swimming = 1.0,
+        sprint = 1.0,
     },
     -- Runtime recovery (NOT a user setting): the player's own camera captured
     -- the moment a context preset first overrode it. Persisted so a /reloadui,
@@ -341,11 +360,13 @@ function Settings.GetPresetStates()
     local vars = GetSavedVarsOrDefaults()
     local saved = type(vars.presetStates) == "table" and vars.presetStates or {}
     return {
-        combat   = NormalizePresetStyle(saved.combat),
-        werewolf = NormalizePresetStyle(saved.werewolf),
-        stealth  = NormalizePresetStyle(saved.stealth),
-        mounted  = NormalizePresetStyle(saved.mounted),
-        sprint   = NormalizePresetStyle(saved.sprint),
+        combat      = NormalizePresetStyle(saved.combat),
+        werewolf    = NormalizePresetStyle(saved.werewolf),
+        stealth     = NormalizePresetStyle(saved.stealth),
+        interaction = NormalizePresetStyle(saved.interaction),
+        mounted     = NormalizePresetStyle(saved.mounted),
+        swimming    = NormalizePresetStyle(saved.swimming),
+        sprint      = NormalizePresetStyle(saved.sprint),
     }
 end
 
@@ -372,6 +393,55 @@ function Settings.SetPresetState(stateId, style)
         return
     end
     vars.presetStates[stateId] = NormalizePresetStyle(style)
+    Settings.ApplyOptionalFeatureConfig()
+end
+
+-- Coerce a stored per-state intensity into a 0..1 number. A missing or
+-- non-numeric value (including installs predating this key) reads as 1.0, so a
+-- state runs at full style strength until the user dials it down.
+local function NormalizePresetIntensity(value)
+    return private.ClampNumber(tonumber(value) or 1.0, 0, 1)
+end
+
+-- Returns the per-state intensity map with every state present (defaults to
+-- 1.0), so ContextPresets.Configure receives a complete table.
+function Settings.GetPresetStateIntensities()
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.presetStateIntensities) == "table" and vars.presetStateIntensities or {}
+    return {
+        combat      = NormalizePresetIntensity(saved.combat),
+        werewolf    = NormalizePresetIntensity(saved.werewolf),
+        stealth     = NormalizePresetIntensity(saved.stealth),
+        interaction = NormalizePresetIntensity(saved.interaction),
+        mounted     = NormalizePresetIntensity(saved.mounted),
+        swimming    = NormalizePresetIntensity(saved.swimming),
+        sprint      = NormalizePresetIntensity(saved.sprint),
+    }
+end
+
+-- Returns a single preset state's intensity (defaults to 1.0). Used by the
+-- per-state sliders so each getFunc avoids allocating the full table.
+function Settings.GetPresetStateIntensity(stateId)
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.presetStateIntensities) == "table" and vars.presetStateIntensities or nil
+    return NormalizePresetIntensity(saved ~= nil and saved[stateId] or nil)
+end
+
+-- Set a single preset state's intensity (0..1) and push the change to the
+-- module. Unknown state ids are ignored so a stale UI reference can't corrupt
+-- savedvars; the value is clamped so only valid intensities are ever stored.
+function Settings.SetPresetStateIntensity(stateId, value)
+    local vars = Settings.GetSavedVars()
+    if not vars then
+        return
+    end
+    if type(vars.presetStateIntensities) ~= "table" then
+        vars.presetStateIntensities = {}
+    end
+    if vars.presetStateIntensities[stateId] == nil and not PRESET_STATE_IDS[stateId] then
+        return
+    end
+    vars.presetStateIntensities[stateId] = NormalizePresetIntensity(value)
     Settings.ApplyOptionalFeatureConfig()
 end
 
@@ -466,6 +536,7 @@ function Settings.ApplyOptionalFeatureConfig()
             intensity = Settings.GetPresetIntensity(),
             smooth    = Settings.ArePresetTransitionsSmooth(),
             states    = Settings.GetPresetStates(),
+            stateIntensities = Settings.GetPresetStateIntensities(),
         })
     end
 end
@@ -503,7 +574,12 @@ function Settings.ResetConfigurationToDefaults(suppressOutput)
     savedVars.presetsEnabled = false
     savedVars.presetIntensity = 1.0
     savedVars.presetStates = {
-        combat = false, werewolf = false, stealth = false, mounted = false, sprint = false,
+        combat = false, werewolf = false, stealth = false, interaction = false,
+        mounted = false, swimming = false, sprint = false,
+    }
+    savedVars.presetStateIntensities = {
+        combat = 1.0, werewolf = 1.0, stealth = 1.0, interaction = 1.0,
+        mounted = 1.0, swimming = 1.0, sprint = 1.0,
     }
     Settings.ApplyConfigurationChanges()
 
@@ -658,6 +734,26 @@ function Settings.RegisterSettingsPanel()
                 default = PRESET_STYLE_OFF,
                 disabled = PresetsDisabled,
                 reference = def.reference,
+            }
+            -- Per-state intensity, paired on the same row as the style dropdown.
+            -- Greyed out both when presets are off globally and when this state's
+            -- style is Off (no effect to scale), so the slider can't imply it is
+            -- doing something while the state contributes nothing.
+            controls[#controls + 1] = {
+                type = "slider",
+                name = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_NAME),
+                tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_TOOLTIP),
+                min = 0,
+                max = 100,
+                step = 5,
+                getFunc = function() return zo_round(Settings.GetPresetStateIntensity(stateId) * 100) end,
+                setFunc = function(value) Settings.SetPresetStateIntensity(stateId, value / 100) end,
+                width = "half",
+                default = 100,
+                disabled = function()
+                    return PresetsDisabled() or Settings.GetPresetState(stateId) == PRESET_STYLE_OFF
+                end,
+                reference = def.reference .. "Intensity",
             }
         end
         return controls
