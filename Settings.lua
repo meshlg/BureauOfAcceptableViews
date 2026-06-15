@@ -707,57 +707,64 @@ function Settings.RegisterSettingsPanel()
                 disabled = PresetsDisabled,
                 reference = "BAVSettingsPresetStatesLabel",
             },
-        }
+        {
+            type = "description",
+            text = GetString(SI_BAV_LABEL_PRESET_STATES_HELP),
+            width = "full",
+            disabled = PresetsDisabled,
+            reference = "BAVSettingsPresetStatesHelp",
+        },
+    }
 
-        -- Style id list + parallel display-name list, shared by every dropdown.
-        -- Built once here from ContextPresets so the choices always match the
-        -- styles the controller actually understands.
-        local cp = addon.ContextPresets
-        local styleIds = (cp and cp.GetStyleIds)
-            and cp.GetStyleIds() or { PRESET_STYLE_OFF }
-        local styleNames = {}
-        for i = 1, #styleIds do
-            styleNames[i] = GetString(StyleNameKey(styleIds[i]))
-        end
-
-        for _, def in ipairs(PRESET_STATE_DEFINITIONS) do
-            local stateId = def.id
-            controls[#controls + 1] = {
-                type = "dropdown",
-                name = GetString(def.nameKey),
-                tooltip = GetString(def.tooltipKey),
-                choices = styleNames,
-                choicesValues = styleIds,
-                getFunc = function() return Settings.GetPresetState(stateId) end,
-                setFunc = function(value) Settings.SetPresetState(stateId, value) end,
-                width = "half",
-                default = PRESET_STYLE_OFF,
-                disabled = PresetsDisabled,
-                reference = def.reference,
-            }
-            -- Per-state intensity, paired on the same row as the style dropdown.
-            -- Greyed out both when presets are off globally and when this state's
-            -- style is Off (no effect to scale), so the slider can't imply it is
-            -- doing something while the state contributes nothing.
-            controls[#controls + 1] = {
-                type = "slider",
-                name = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_NAME),
-                tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_TOOLTIP),
-                min = 0,
-                max = 100,
-                step = 5,
-                getFunc = function() return zo_round(Settings.GetPresetStateIntensity(stateId) * 100) end,
-                setFunc = function(value) Settings.SetPresetStateIntensity(stateId, value / 100) end,
-                width = "half",
-                default = 100,
-                disabled = function()
-                    return PresetsDisabled() or Settings.GetPresetState(stateId) == PRESET_STYLE_OFF
-                end,
-                reference = def.reference .. "Intensity",
-            }
-        end
-        return controls
+    -- Style id list + parallel display-name list, shared by every dropdown.
+    -- Built once here from ContextPresets so the choices always match the
+    -- styles the controller actually understands.
+    local cp = addon.ContextPresets
+    local styleIds = (cp and cp.GetStyleIds)
+        and cp.GetStyleIds() or { PRESET_STYLE_OFF }
+    local styleNames = {}
+    for i = 1, #styleIds do
+        styleNames[i] = GetString(StyleNameKey(styleIds[i]))
     end
+
+    for _, def in ipairs(PRESET_STATE_DEFINITIONS) do
+        local stateId = def.id
+        controls[#controls + 1] = {
+            type = "dropdown",
+            name = GetString(def.nameKey),
+            tooltip = GetString(def.tooltipKey),
+            choices = styleNames,
+            choicesValues = styleIds,
+            getFunc = function() return Settings.GetPresetState(stateId) end,
+            setFunc = function(value) Settings.SetPresetState(stateId, value) end,
+            width = "half",
+            default = PRESET_STYLE_OFF,
+            disabled = PresetsDisabled,
+            reference = def.reference,
+        }
+        -- Per-state intensity, paired on the same row as the style dropdown.
+        -- Greyed out both when presets are off globally and when this state's
+        -- style is Off (no effect to scale), so the slider can't imply it is
+        -- doing something while the state contributes nothing.
+        controls[#controls + 1] = {
+            type = "slider",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_INTENSITY_TOOLTIP),
+            min = 0,
+            max = 100,
+            step = 5,
+            getFunc = function() return zo_round(Settings.GetPresetStateIntensity(stateId) * 100) end,
+            setFunc = function(value) Settings.SetPresetStateIntensity(stateId, value / 100) end,
+            width = "half",
+            default = 100,
+            disabled = function()
+                return PresetsDisabled() or Settings.GetPresetState(stateId) == PRESET_STYLE_OFF
+            end,
+            reference = def.reference .. "Intensity",
+        }
+    end
+    return controls
+end
 
     local panelData = {
         type = "panel",
