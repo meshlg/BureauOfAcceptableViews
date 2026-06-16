@@ -385,6 +385,11 @@ local controller = {
     restoreSlot     = "ContextPresets.controllerRestore",
     polling         = false,
     recovered       = false,   -- load-time snapshot recovery runs once per session
+    -- True while the ESO options window is open. The player may be editing the
+    -- real camera settings (FOV, etc.) there, so while it is up we hand the live
+    -- camera back to its pre-preset snapshot and suspend re-evaluation; on close
+    -- we re-snapshot the (possibly edited) base and re-apply the active state.
+    optionsOpen     = false,
 }
 
 -- The named scratch slot used to stash the player's pre-preset camera. Reusing
@@ -787,6 +792,13 @@ local function Reevaluate()
         return
     end
 
+    -- While the options window is open the camera is intentionally handed back to
+    -- the player's snapshot so they can edit the real settings. Don't fight that
+    -- by re-applying a state mid-edit; OnOptionsClosed re-evaluates once on close.
+    if controller.optionsOpen then
+        return
+    end
+
     local resolved = ResolveActiveState()
     if resolved == controller.activeState then
         return
@@ -855,26 +867,96 @@ end
 -- Interaction/dialogue is bracketed by EVENT_CHATTER_BEGIN (talking to an NPC,
 -- quest giver, etc.) and EVENT_CHATTER_END (the conversation closed), so the
 -- framing applies for the duration of the chatter window only.
-local function OnChatterBegin(_)
+--
+-- ENTRY DEBOUNCE: unlike combat or a transformation, a "conversation" is often
+-- just a flash -- clicking a merchant, spamming through a quest turn-in -- where
+-- chatter begins and ends in a fraction of a second. The coalescer above damps
+-- the EXIT of a state, but interaction needs the opposite: its ENTRY must be
+-- delayed, or the camera "pecks" on every quick click. So OnChatterBegin does not
+-- record the physical flag immediately; it arms a short timer and only commits
+-- the interaction state if the conversation is still open when the timer elapses.
+-- A chatter that ends inside the window cancels the pending entry, so a fast click
+-- never moves the camera at all. This debounce is interaction-only by design:
+-- combat/werewolf keep their instant, responsive entry.
+local INTERACTION_ENTRY_NAME = "BAV_ContextPresets_InteractionEntry"
+local INTERACTION_ENTRY_DEBOUNCE_MS = 500
+
+-- pending gates the one-shot entry timer; nothing runs while idle.
+local interactionEntry = {
+    pending = false,
+}
+
+-- Tear down the entry-debounce timer. Idempotent, so it doubles as the cancel
+-- path on chatter-end, disable, and emergency restore.
+local function CancelInteractionEntry()
+    if interactionEntry.pending then
+        EVENT_MANAGER:UnregisterForUpdate(INTERACTION_ENTRY_NAME)
+        interactionEntry.pending = false
+    end
+end
+
+-- One-shot: unregister immediately, then commit the interaction flag now that the
+-- conversation has outlasted the debounce window. SetPhysical re-evaluates, so
+-- priority still decides whether interaction actually frames the camera.
+local function OnInteractionEntryElapsed()
+    CancelInteractionEntry()
     SetPhysical(STATE_INTERACTION, true)
 end
 
+-- Arm the entry debounce, unless one is already pending or interaction is already
+-- physically active (a re-fired begin without an end). The timer fires once after
+-- the window and commits the flag.
+local function ArmInteractionEntry()
+    if interactionEntry.pending or controller.physical[STATE_INTERACTION] then
+        return
+    end
+    interactionEntry.pending = true
+    EVENT_MANAGER:RegisterForUpdate(
+        INTERACTION_ENTRY_NAME, INTERACTION_ENTRY_DEBOUNCE_MS, OnInteractionEntryElapsed)
+end
+
+local function OnChatterBegin(_)
+    -- Defer entry: only frame the conversation if it lasts past the debounce, so a
+    -- quick merchant click does not peck the camera.
+    ArmInteractionEntry()
+end
+
 local function OnChatterEnd(_)
+    -- Cancel a still-pending entry first: a conversation that ended inside the
+    -- debounce window never committed the flag, so this makes the quick-click case
+    -- a true no-op (the camera never moved). If the entry already committed (a
+    -- real conversation), clear the flag so the camera leaves interaction framing.
+    CancelInteractionEntry()
     SetPhysical(STATE_INTERACTION, false)
 end
 
--- Sprint has no dedicated event, so we poll while the feature is enabled AND
--- the sprint state is one the user actually toggled on -- otherwise we never
--- start the timer, keeping overhead at zero for users who don't use it.
--- DETECTION: the client exposes no reliable "is sprinting" query, so we follow
--- the common addon approach and read the Shift key (ESO's default sprint bind)
--- via IsShiftKeyDown(), gated on IsPlayerMoving() so that holding Shift while
--- standing still or in menus does not trigger the sprint preset.
--- NOTE: this assumes the player kept sprint on the default Shift bind; if they
--- rebound it, detection will not match. Acceptable per user decision.
+-- Sprint has no dedicated start/stop event, so we sample it on a timer while the
+-- feature is enabled AND the sprint state is one the user actually toggled on --
+-- otherwise we never start the timer, keeping overhead at zero for users who do
+-- not use it.
+--
+-- DETECTION: the client exposes no reliable "is sprinting" query. When the
+-- LibSprint library is present we read its computed LibSprint.isPlayerSprinting
+-- flag -- it detects sprint via action-slot highlighting, so it works regardless
+-- of how the player bound sprint (and on gamepad). LibSprint has no callback to
+-- subscribe to (only the polled flag), so the timer stays either way; the library
+-- only buys a more accurate reading, not the removal of the poll.
+--
+-- FALLBACK (no LibSprint): read the Shift key (ESO's default sprint bind) via
+-- IsShiftKeyDown(), gated on IsPlayerMoving() so holding Shift while standing
+-- still or in menus does not trigger the sprint preset. This assumes the player
+-- kept the default Shift bind; if they rebound it, detection will not match.
+local function IsPlayerSprinting()
+    local lib = LibSprint
+    if lib ~= nil and lib.isPlayerSprinting ~= nil then
+        return lib.isPlayerSprinting and true or false
+    end
+    -- Fallback heuristic when LibSprint is not installed.
+    return IsShiftKeyDown() and IsPlayerMoving()
+end
+
 local function PollSprint()
-    local sprinting = IsShiftKeyDown() and IsPlayerMoving()
-    SetPhysical(STATE_SPRINT, sprinting)
+    SetPhysical(STATE_SPRINT, IsPlayerSprinting())
 end
 
 local function StartSprintPolling()
@@ -916,6 +998,96 @@ local function UnregisterStateEvents()
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_PLAYER_NOT_SWIMMING)
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_BEGIN)
     EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_CHATTER_END)
+end
+
+-- ---------------------------------------------------------------------------
+-- Options-window coordination
+-- ---------------------------------------------------------------------------
+-- While the ESO settings window is open the player may edit the real camera
+-- settings (FOV, etc.). But if a preset is active, the LIVE camera shows the
+-- preset's values, not the player's -- so editing there would mean editing a
+-- masked value, and re-snapshotting the live camera afterward would bake the
+-- preset's offsets into the "base" snapshot (compounding every session, the very
+-- thing RecoverPersistedSnapshot guards against).
+--
+-- So we bracket the options window:
+--   * OPEN  -> if a preset is overriding the camera, hand the live camera back to
+--              the captured snapshot (Apply(snapshot, true): direct write, drops
+--              any FOV hold) so the player sees and edits their REAL settings.
+--              The capture is kept; only the camera is reverted. Re-evaluation is
+--              suspended (controller.optionsOpen) so a state change while the menu
+--              is up cannot re-apply a preset over what they are editing.
+--   * CLOSE -> forget the now-stale snapshot, re-snapshot the (possibly edited)
+--              live camera as the fresh base, then re-resolve and re-apply the
+--              active state on top of it.
+-- The fragment is the options window specifically (not the ESC menu), so this
+-- never fires for the in-game system menu.
+local OPTIONS_FRAGMENT = OPTIONS_WINDOW_FRAGMENT
+
+local function OnOptionsOpened()
+    if not controller.enabled or controller.optionsOpen then
+        return
+    end
+    controller.optionsOpen = true
+
+    -- Stop any in-flight transition/coalesce so nothing re-applies a preset while
+    -- the player is editing the real settings.
+    StopTransition()
+    CancelCoalesce()
+    CancelInteractionEntry()
+
+    -- Only revert the camera if a preset is actually overriding it (a snapshot
+    -- exists). At default state there is nothing masking the real settings.
+    if ContextPresets.HasCapture(RESTORE_SLOT) then
+        LogDebug("ContextPresets: options opened, reverting to snapshot for editing")
+        ContextPresets.Apply(slots[RESTORE_SLOT], true)
+    end
+end
+
+local function OnOptionsClosed()
+    if not controller.optionsOpen then
+        return
+    end
+    controller.optionsOpen = false
+
+    if not controller.enabled then
+        return
+    end
+
+    -- The player may have changed the real camera settings. Drop the stale
+    -- pre-edit snapshot WITHOUT restoring it (restoring would write the old values
+    -- back over the player's fresh edits), then force the active state to be
+    -- recomputed: the next ApplyState re-snapshots the edited live camera as the
+    -- new base and layers the preset on top of it.
+    LogDebug("ContextPresets: options closed, re-snapshotting base and re-applying")
+    ContextPresets.ClearCapture(RESTORE_SLOT)
+    PersistRestoreSnapshot(nil)
+    controller.activeState = STATE_DEFAULT
+    Reevaluate()
+end
+
+-- The options fragment exposes a StateChange callback (shown/hidden). Resolved at
+-- registration time and guarded, so a client build without the fragment simply
+-- skips the feature instead of erroring.
+local function OnOptionsFragmentStateChange(oldState, newState)
+    if newState == SCENE_FRAGMENT_SHOWN then
+        OnOptionsOpened()
+    elseif newState == SCENE_FRAGMENT_HIDDEN then
+        OnOptionsClosed()
+    end
+end
+
+local function RegisterOptionsEvents()
+    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.RegisterCallback then
+        OPTIONS_FRAGMENT:RegisterCallback("StateChange", OnOptionsFragmentStateChange)
+    end
+end
+
+local function UnregisterOptionsEvents()
+    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.UnregisterCallback then
+        OPTIONS_FRAGMENT:UnregisterCallback("StateChange", OnOptionsFragmentStateChange)
+    end
+    controller.optionsOpen = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -970,6 +1142,7 @@ local function SetEnabled(enabled)
     if enabled then
         controller.enabled = true
         RegisterStateEvents()
+        RegisterOptionsEvents()
         -- Sprint polling only runs when sprint has a non-Off style selected.
         if StyleForState(STATE_SPRINT) ~= STYLE_OFF then
             StartSprintPolling()
@@ -982,9 +1155,11 @@ local function SetEnabled(enabled)
         -- would start a glide that runs after enabled=false -- wrong UX and a
         -- false "glide while disabled" signal.)
         UnregisterStateEvents()
+        UnregisterOptionsEvents()
         StopSprintPolling()
         StopTransition()
         CancelCoalesce()
+        CancelInteractionEntry()
         RestoreAndForget()
         controller.activeState = STATE_DEFAULT
         controller.physical = {}
@@ -1093,6 +1268,9 @@ function ContextPresets.EmergencyRestore()
     -- Drop any pending coalesce timer too, or it would fire after the panic
     -- restore and re-apply a state we just handed back.
     CancelCoalesce()
+    -- Same for a pending interaction entry: it would otherwise commit the
+    -- interaction flag after the panic restore and re-frame the camera.
+    CancelInteractionEntry()
 
     local arbiter = addon.FovArbiter
     if arbiter and arbiter.ForceRelease() then
@@ -1168,6 +1346,47 @@ function ContextPresets.RecoverPersistedSnapshot()
     return true
 end
 
+-- Re-pin the currently-active preset's framing onto the live camera, instantly.
+-- ---------------------------------------------------------------------------
+-- EVENT_PLAYER_ACTIVATED fires on every zone change, not just login, and the
+-- engine resets the camera (zoom, FOV, offsets) across the load screen. The
+-- core's OnPlayerActivated re-applies the player's saved ZOOM, but the physical
+-- state flags survive a zone change WITHOUT re-firing their events -- so a
+-- preset that was active before the load (e.g. combat) never re-runs ApplyState
+-- and its framing is left stomped by the restored base zoom (and the wiped
+-- FOV/offsets stay wiped). This hands distance/FOV/offsets back to the active
+-- preset so its framing survives the zone change.
+--
+-- Instant (no glide): we are coming off a load screen, so the preset framing
+-- should already be in place when the world fades in, not ease in afterward.
+-- No-op when the controller is disabled, idle at the default state, or has no
+-- snapshot to resolve the bundle against -- so it is free for users who never
+-- enabled presets and never fights the normal (default-state) zoom restore.
+function ContextPresets.ReassertActive()
+    if not controller.enabled then
+        return false
+    end
+
+    local stateId = controller.activeState
+    if stateId == STATE_DEFAULT then
+        return false
+    end
+
+    local snapshot = slots[RESTORE_SLOT]
+    local preset = ResolveBundle(stateId, snapshot)
+    if not preset then
+        return false
+    end
+
+    -- Cancel any in-flight glide and snap the resolved bundle back exactly.
+    -- isRestore=false so FOV re-pins through the arbiter hold, matching what the
+    -- original ApplyState established for this state.
+    StopTransition()
+    LogDebug("ContextPresets.ReassertActive: re-pinning state '%s' after activation", stateId)
+    ContextPresets.Apply(preset, false)
+    return true
+end
+
 -- ---------------------------------------------------------------------------
 -- Diagnostics accessor
 -- ---------------------------------------------------------------------------
@@ -1184,6 +1403,8 @@ end
 --   smooth          state transitions are eased (vs. instant snap)
 --   fovGliding      the arbiter's FOV glide updater is currently registered
 --   coalescePending a coalesce timer is armed (a state change is waiting to settle)
+--   optionsOpen     the ESO options window is open (camera reverted for editing)
+--   interactionEntryPending  the interaction entry-debounce timer is armed
 function ContextPresets.GetDiagnostics()
     local slotCount = 0
     for _ in pairs(slots) do
@@ -1201,5 +1422,7 @@ function ContextPresets.GetDiagnostics()
         smooth             = controller.smooth,
         fovGliding         = addon.FovArbiter and addon.FovArbiter.IsGliding() or false,
         coalescePending    = coalesce.pending,
+        optionsOpen        = controller.optionsOpen,
+        interactionEntryPending = interactionEntry.pending,
     }
 end

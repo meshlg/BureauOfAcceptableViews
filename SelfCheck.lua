@@ -275,6 +275,42 @@ local function CheckCoalesceLeak()
     return nil
 end
 
+-- The options-window flag tracks whether the ESO settings window is open, during
+-- which the controller reverts the camera for editing and suspends evaluation. It
+-- is cleared on options-close and on disable. If it is still set while the
+-- controller is disabled, the flag leaked -- the controller would wrongly believe
+-- the menu is up and suppress evaluation if re-enabled.
+local function CheckOptionsOpenLeak()
+    local presets = addon.ContextPresets
+    if not (presets and presets.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = presets.GetDiagnostics()
+    if diag.optionsOpen and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_OPTIONS_OPEN_LEAK)
+    end
+    return nil
+end
+
+-- The interaction entry-debounce timer is a one-shot that commits the interaction
+-- state after a brief delay (so quick merchant clicks do not peck the camera). It
+-- unregisters itself when it fires and is cancelled on chatter-end, disable, and
+-- emergency restore. If it is still armed while the controller is disabled, the
+-- timer leaked -- the same standing per-frame cost the other timer checks guard.
+local function CheckInteractionEntryLeak()
+    local presets = addon.ContextPresets
+    if not (presets and presets.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = presets.GetDiagnostics()
+    if diag.interactionEntryPending and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_INTERACTION_ENTRY_LEAK)
+    end
+    return nil
+end
+
 -- Ordered list of invariant checks. Add an entry and it is automatically part of
 -- every run and report.
 local INVARIANT_CHECKS = {
@@ -285,6 +321,8 @@ local INVARIANT_CHECKS = {
     CheckTransitionLeak,
     CheckFovGlideLeak,
     CheckCoalesceLeak,
+    CheckOptionsOpenLeak,
+    CheckInteractionEntryLeak,
 }
 
 -- Run every invariant check, returning a list of localized problem strings (empty

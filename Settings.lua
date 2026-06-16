@@ -573,9 +573,13 @@ function Settings.ResetConfigurationToDefaults(suppressOutput)
     savedVars.dynamicFovFar = nil
     savedVars.presetsEnabled = false
     savedVars.presetIntensity = 1.0
+    -- Store the off STYLE id (not a legacy boolean) so a reset leaves the same
+    -- string-keyed shape every other write produces; NormalizePresetStyle still
+    -- accepts the old boolean on read, but we no longer author it here.
     savedVars.presetStates = {
-        combat = false, werewolf = false, stealth = false, interaction = false,
-        mounted = false, swimming = false, sprint = false,
+        combat = PRESET_STYLE_OFF, werewolf = PRESET_STYLE_OFF, stealth = PRESET_STYLE_OFF,
+        interaction = PRESET_STYLE_OFF, mounted = PRESET_STYLE_OFF, swimming = PRESET_STYLE_OFF,
+        sprint = PRESET_STYLE_OFF,
     }
     savedVars.presetStateIntensities = {
         combat = 1.0, werewolf = 1.0, stealth = 1.0, interaction = 1.0,

@@ -7,7 +7,7 @@ is on out of the box for an eased zoom feel; everything else stays out of your
 way until you turn it on.
 
 > **Compatibility:** API: LIVE 101050 / PTS 101050 · Optional: LibAddonMenu-2.0 (>= 43)
-> for the settings panel.
+> for the settings panel, and LibSprint for bind-independent sprint detection.
 
 ---
 
@@ -49,6 +49,9 @@ unsupported); context presets stay disabled until you switch them on.
 - Entering a state is instant, but leaving one is briefly damped: a rapid
   out-and-back (combat ending and restarting a moment later) keeps the cinematic
   framing instead of snapping the camera around, so the view never jitters.
+- The interaction state is the exception: entering it is briefly delayed, so
+  flicking through a merchant or quick quest turn-in never pecks the camera —
+  only a conversation you actually stay in reframes the shot.
 - Exactly one state is active at a time, resolved by priority
   (werewolf → combat → stealth → mounted → sprint), so states never fight each
   other.
@@ -59,6 +62,10 @@ unsupported); context presets stay disabled until you switch them on.
   **persisted**, so a `/reloadui`, logout, or crash while a preset is active
   hands your real camera back next session instead of baking the preset's
   offsets into your settings.
+- Open the game's settings while a preset is active and your camera quietly
+  reverts to your real values for editing, then the preset re-applies on top of
+  your changes when you close it — so tweaking FOV or distance never fights the
+  active preset or gets baked into your saved framing.
 - An **emergency restore** button in the settings panel instantly returns the
   camera to your control if anything ever feels stuck.
 

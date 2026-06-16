@@ -150,7 +150,6 @@ local LASTZOOM_THRESHOLD           = 2.0   -- Default minimum zoom value to save
 local ZOOM_FPV                     = 0.0   -- First person view zoom
 local ZOOM_STEP                    = 0.3   -- Default zoom step size
 local PRESERVE_FPV_BETWEEN_ZONES   = true  -- Default behavior: keep FPV across relogs and zone changes
-local ZOOM_VERIFY_EPSILON          = 0.05  -- Allowed delta when verifying applied camera zoom
 local ZOOM_STEP_MIN                = 0.05  -- Minimum configurable zoom step
 local ZOOM_STEP_MAX                = 5.0   -- Maximum configurable zoom step
 local CONFIG_MIN_THIRD_PERSON_ZOOM = 0.10  -- Lowest sensible configurable third-person fallback zoom
@@ -162,7 +161,6 @@ private.constants = {
     ZOOM_FPV = ZOOM_FPV,
     ZOOM_STEP = ZOOM_STEP,
     PRESERVE_FPV_BETWEEN_ZONES = PRESERVE_FPV_BETWEEN_ZONES,
-    ZOOM_VERIFY_EPSILON = ZOOM_VERIFY_EPSILON,
     ZOOM_STEP_MIN = ZOOM_STEP_MIN,
     ZOOM_STEP_MAX = ZOOM_STEP_MAX,
     CONFIG_MIN_THIRD_PERSON_ZOOM = CONFIG_MIN_THIRD_PERSON_ZOOM,
@@ -400,7 +398,10 @@ local function SetCameraZoom(zoom)
         return false
     end
 
-    local applied = BureauOfAcceptableViews.CameraSettings.Set("distance", zoom, ZOOM_VERIFY_EPSILON)
+    -- The write-verify tolerance is owned by CameraSettings (its default
+    -- VERIFY_EPSILON); we no longer keep a second copy of that 0.05 here. Omit
+    -- the epsilon argument so there is a single source of truth for it.
+    local applied = BureauOfAcceptableViews.CameraSettings.Set("distance", zoom)
     if not applied then
         LogWarn(SI_BAV_LOG_SET_APPLY_FAILED, zoom)
         return false
@@ -658,6 +659,17 @@ local function OnPlayerActivated(event)
     else
         LogWarn(SI_BAV_LOG_INVALID_SAVED_STATE,
             tostring(savedVars.currentZoom), tostring(savedVars.lastThirdPersonZoom))
+    end
+
+    -- EVENT_PLAYER_ACTIVATED also fires on every zone change, and the engine
+    -- resets the camera across the load screen. The physical state flags survive
+    -- a zone change without re-firing their events, so a preset that was active
+    -- before the load (e.g. combat) never re-runs on its own and the zoom restore
+    -- above would leave its framing stomped. Hand distance/FOV/offsets back to the
+    -- active preset so its framing survives the zone change. No-op when presets
+    -- are off or idle at the default state, so default behaviour is unchanged.
+    if presets and presets.ReassertActive then
+        presets.ReassertActive()
     end
 
     -- Passive reliability pass at a naturally-quiet moment (post-load screen,
