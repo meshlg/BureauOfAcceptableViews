@@ -380,6 +380,7 @@ local controller = {
     smooth          = true,    -- ease state transitions (spatial glide + FOV glide)
     stateStyles     = {},      -- [stateId] = style id (defaults to STYLE_OFF)
     stateIntensities = {},     -- [stateId] = 0..1 per-state multiplier (defaults to 1.0)
+    stateCoalesceMs = {},      -- [stateId] = release delay in ms (defaults to 0 = off)
     activeState     = STATE_DEFAULT,
     physical        = {},      -- [stateId] = true while physically in that state
     restoreSlot     = "ContextPresets.controllerRestore",
@@ -722,12 +723,15 @@ end
 --     combat, transforming) applies IMMEDIATELY, so reacting to danger stays
 --     responsive. Applying also cancels any pending release.
 --   * DE-ESCALATION (resolved state drops toward default / a lower-priority
---     state -- e.g. combat ending) is DEFERRED by STATE_COALESCE_MS and
---     re-resolved THEN. Because the physical flags update immediately, a quick
---     out-and-back (combat ends, then restarts inside the window) re-escalates
---     and the deferred release nets to a no-op (ApplyState skips when the
---     resolved state already equals the active one). A drop that really settled
---     applies exactly once when the window elapses.
+--     state -- e.g. combat ending) is DEFERRED by the LEAVING state's own
+--     release window and re-resolved THEN. That window is per-state and
+--     USER-CONFIGURABLE (Settings pushes it in via Configure); it defaults to 0
+--     for every state, meaning "release immediately, no coalescing", until the
+--     user picks a delay in the options panel. Because the physical flags update
+--     immediately, a quick out-and-back (combat ends, then restarts inside the
+--     window) re-escalates and the deferred release nets to a no-op (ApplyState
+--     skips when the resolved state already equals the active one). A drop that
+--     really settled applies exactly once when the window elapses.
 --
 -- This fixes the old time-anchored model, where a release after a long combat
 -- (longer than the window) applied instantly and never damped the very jitter
@@ -735,7 +739,26 @@ end
 -- elsewhere: the timer registers only while a release is pending and
 -- unregisters itself the moment it fires.
 local COALESCE_UPDATE_NAME = "BAV_ContextPresets_Coalesce"
-local STATE_COALESCE_MS = 2500
+
+-- Default release delay (ms) for a state with no stored value. 0 means "release
+-- immediately, no coalescing" -- the shipped default for every state, so presets
+-- do not damp state exits until the user opts a state into a delay. Per-state
+-- values live in SavedVariables and are pushed in via Configure (stateCoalesce).
+local DEFAULT_COALESCE_MS = 0
+
+-- The release delay (ms) for leaving the given state, read from the user-set map.
+-- A missing or non-numeric entry falls back to DEFAULT_COALESCE_MS; negatives are
+-- clamped to 0. In practice we only ever look up the state we are actively leaving.
+local function CoalesceDelayFor(stateId)
+    local delay = tonumber(controller.stateCoalesceMs[stateId])
+    if delay == nil then
+        return DEFAULT_COALESCE_MS
+    end
+    if delay < 0 then
+        return 0
+    end
+    return delay
+end
 
 -- pending gates the one-shot updater; nothing else runs while idle.
 local coalesce = {
@@ -785,8 +808,9 @@ end
 -- Recompute the active state from current inputs and apply per the fast-
 -- escalate / slow-release rule: an escalation (or any change while a release is
 -- already pending, which re-resolves the latest state) applies immediately; a
--- de-escalation toward a lower-priority state is deferred by STATE_COALESCE_MS
--- so a quick out-and-back collapses to a no-op instead of jittering the camera.
+-- de-escalation toward a lower-priority state is deferred by the leaving state's
+-- own release window (CoalesceDelayFor) so a quick out-and-back collapses to a
+-- no-op instead of jittering the camera.
 local function Reevaluate()
     if not controller.enabled then
         return
@@ -810,8 +834,16 @@ local function Reevaluate()
         return
     end
 
-    -- De-escalation: defer so a fast re-escalation inside the window cancels it.
-    ScheduleCoalesce(STATE_COALESCE_MS)
+    -- De-escalation: defer by the slow-release window of the state we are LEAVING,
+    -- so a fast re-escalation inside that window cancels it. Each state carries its
+    -- own delay (combat damps hard at 2500 ms; the rest use small per-state
+    -- debounces). A delay of 0 or below means release immediately.
+    local delay = CoalesceDelayFor(controller.activeState)
+    if delay > 0 then
+        ScheduleCoalesce(delay)
+    else
+        ApplyResolvedNow()
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -879,7 +911,7 @@ end
 -- never moves the camera at all. This debounce is interaction-only by design:
 -- combat/werewolf keep their instant, responsive entry.
 local INTERACTION_ENTRY_NAME = "BAV_ContextPresets_InteractionEntry"
-local INTERACTION_ENTRY_DEBOUNCE_MS = 500
+local INTERACTION_ENTRY_DEBOUNCE_MS = 250
 
 -- pending gates the one-shot entry timer; nothing runs while idle.
 local interactionEntry = {
@@ -1179,6 +1211,10 @@ end
 --   stateIntensities { combat=<0..1>, werewolf=<0..1>, ... } per-state multiplier
 --                  layered on top of the global intensity and the state's style
 --                  strength. A missing entry is treated as 1.0 (no attenuation).
+--   stateCoalesce { combat=<ms>, werewolf=<ms>, ... } per-state release delay in
+--                  milliseconds: how long leaving that state is deferred so a fast
+--                  out-and-back collapses to a no-op. A missing entry is treated as
+--                  0 (release immediately, no coalescing).
 -- Unspecified fields are left unchanged. Safe to call repeatedly; it diffs and
 -- only re-evaluates when something that affects the active state changed.
 function ContextPresets.Configure(options)
@@ -1221,6 +1257,17 @@ function ContextPresets.Configure(options)
             local value = options.stateIntensities[stateId]
             if value ~= nil then
                 controller.stateIntensities[stateId] = Clamp(tonumber(value) or 1.0, 0, 1)
+            end
+        end
+    end
+
+    if type(options.stateCoalesce) == "table" then
+        for _, stateId in ipairs(STATE_PRIORITY) do
+            local value = options.stateCoalesce[stateId]
+            if value ~= nil then
+                local ms = tonumber(value) or 0
+                if ms < 0 then ms = 0 end
+                controller.stateCoalesceMs[stateId] = ms
             end
         end
     end

@@ -58,6 +58,32 @@ local function StyleNameKey(styleId)
     return PRESET_STYLE_NAME_KEYS[styleId] or tostring(styleId)
 end
 
+-- Selectable per-state release-delay values (ms) for the settings dropdowns. 0 is
+-- always "Off" (release immediately). Combat gets a coarser, longer list because
+-- it is the state that flickers over seconds; every other state gets a finer list
+-- skewed toward small debounces. Both are user-facing only -- the controller just
+-- stores whatever ms value is picked.
+local PRESET_COALESCE_VALUES_COMBAT = { 0, 1000, 1500, 2500, 3500, 5000 }
+local PRESET_COALESCE_VALUES_DEFAULT = { 0, 25, 50, 75, 100, 150, 500, 1000, 1500, 3000 }
+
+-- Build the display labels parallel to a values list: 0 -> "Off", sub-second
+-- values -> "<n> ms", whole/decimal seconds -> "<n> s" (via %g so 1, 1.5, 3 read
+-- cleanly). Localized via the format strings so other languages control the unit.
+local function BuildCoalesceLabels(values)
+    local labels = {}
+    for i = 1, #values do
+        local ms = values[i]
+        if ms <= 0 then
+            labels[i] = GetString(SI_BAV_SETTING_PRESET_COALESCE_OFF)
+        elseif ms < 1000 then
+            labels[i] = string.format(GetString(SI_BAV_SETTING_PRESET_COALESCE_MS_FORMAT), ms)
+        else
+            labels[i] = string.format(GetString(SI_BAV_SETTING_PRESET_COALESCE_S_FORMAT), ms / 1000)
+        end
+    end
+    return labels
+end
+
 if PRESERVE_FPV_BETWEEN_ZONES == nil then
     PRESERVE_FPV_BETWEEN_ZONES = true
 end
@@ -79,6 +105,7 @@ end
 ---@field presetSmoothTransitions boolean
 ---@field presetStates table<string, string>
 ---@field presetStateIntensities table<string, number>
+---@field presetStateCoalesce table<string, number>
 ---@field presetRestoreSnapshot table|nil
 
 ---@type BAVSavedVars
@@ -129,6 +156,21 @@ local DEFAULT_SAVED_VARS = {
         mounted = 1.0,
         swimming = 1.0,
         sprint = 1.0,
+    },
+    -- Per-state release delay (ms): how long leaving that state is deferred so a
+    -- fast out-and-back collapses to a no-op instead of jolting the camera. All
+    -- default to 0 (release immediately, no coalescing) so presets do not damp
+    -- state exits until the user opts a state into a delay in the panel; an
+    -- install predating this key reads missing entries as 0 too, so upgrades are
+    -- seamless.
+    presetStateCoalesce = {
+        combat = 0,
+        werewolf = 0,
+        stealth = 0,
+        interaction = 0,
+        mounted = 0,
+        swimming = 0,
+        sprint = 0,
     },
     -- Runtime recovery (NOT a user setting): the player's own camera captured
     -- the moment a context preset first overrode it. Persisted so a /reloadui,
@@ -445,6 +487,59 @@ function Settings.SetPresetStateIntensity(stateId, value)
     Settings.ApplyOptionalFeatureConfig()
 end
 
+-- Coerce a stored per-state coalesce delay into a non-negative number of ms. A
+-- missing or non-numeric value (including installs predating this key) reads as 0,
+-- meaning "release immediately, no coalescing".
+local function NormalizePresetCoalesce(value)
+    local ms = tonumber(value) or 0
+    if ms < 0 then
+        ms = 0
+    end
+    return ms
+end
+
+-- Returns the per-state release-delay map (ms) with every state present (defaults
+-- to 0), so ContextPresets.Configure receives a complete table.
+function Settings.GetPresetStateCoalesces()
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.presetStateCoalesce) == "table" and vars.presetStateCoalesce or {}
+    return {
+        combat      = NormalizePresetCoalesce(saved.combat),
+        werewolf    = NormalizePresetCoalesce(saved.werewolf),
+        stealth     = NormalizePresetCoalesce(saved.stealth),
+        interaction = NormalizePresetCoalesce(saved.interaction),
+        mounted     = NormalizePresetCoalesce(saved.mounted),
+        swimming    = NormalizePresetCoalesce(saved.swimming),
+        sprint      = NormalizePresetCoalesce(saved.sprint),
+    }
+end
+
+-- Returns a single preset state's release delay in ms (defaults to 0). Used by the
+-- per-state dropdowns so each getFunc avoids allocating the full table.
+function Settings.GetPresetStateCoalesce(stateId)
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.presetStateCoalesce) == "table" and vars.presetStateCoalesce or nil
+    return NormalizePresetCoalesce(saved ~= nil and saved[stateId] or nil)
+end
+
+-- Set a single preset state's release delay (ms) and push the change to the
+-- module. Unknown state ids are ignored so a stale UI reference can't corrupt
+-- savedvars; the value is normalized so only non-negative ms are ever stored.
+function Settings.SetPresetStateCoalesce(stateId, value)
+    local vars = Settings.GetSavedVars()
+    if not vars then
+        return
+    end
+    if type(vars.presetStateCoalesce) ~= "table" then
+        vars.presetStateCoalesce = {}
+    end
+    if vars.presetStateCoalesce[stateId] == nil and not PRESET_STATE_IDS[stateId] then
+        return
+    end
+    vars.presetStateCoalesce[stateId] = NormalizePresetCoalesce(value)
+    Settings.ApplyOptionalFeatureConfig()
+end
+
 -- ---------------------------------------------------------------------------
 -- Preset restore-snapshot persistence (recovery, not a user setting)
 -- ---------------------------------------------------------------------------
@@ -537,6 +632,7 @@ function Settings.ApplyOptionalFeatureConfig()
             smooth    = Settings.ArePresetTransitionsSmooth(),
             states    = Settings.GetPresetStates(),
             stateIntensities = Settings.GetPresetStateIntensities(),
+            stateCoalesce = Settings.GetPresetStateCoalesces(),
         })
     end
 end
@@ -584,6 +680,10 @@ function Settings.ResetConfigurationToDefaults(suppressOutput)
     savedVars.presetStateIntensities = {
         combat = 1.0, werewolf = 1.0, stealth = 1.0, interaction = 1.0,
         mounted = 1.0, swimming = 1.0, sprint = 1.0,
+    }
+    savedVars.presetStateCoalesce = {
+        combat = 0, werewolf = 0, stealth = 0, interaction = 0,
+        mounted = 0, swimming = 0, sprint = 0,
     }
     Settings.ApplyConfigurationChanges()
 
@@ -733,6 +833,16 @@ function Settings.RegisterSettingsPanel()
 
     for _, def in ipairs(PRESET_STATE_DEFINITIONS) do
         local stateId = def.id
+
+        -- Small vertical spacer before each state group for visual separation
+        -- between categories (combat, werewolf, etc.).
+        controls[#controls + 1] = {
+            type = "description",
+            text = " ",
+            width = "full",
+            disabled = PresetsDisabled,
+        }
+
         controls[#controls + 1] = {
             type = "dropdown",
             name = GetString(def.nameKey),
@@ -765,6 +875,26 @@ function Settings.RegisterSettingsPanel()
                 return PresetsDisabled() or Settings.GetPresetState(stateId) == PRESET_STYLE_OFF
             end,
             reference = def.reference .. "Intensity",
+        }
+        -- Per-state release delay, placed on its own full-width row below the
+        -- style+intensity pair so each state's controls form a clear visual
+        -- group instead of cramming three half-width items together. Combat uses
+        -- the coarse seconds-scale list; every other state uses the fine ms-scale
+        -- list. Greyed only when presets are off globally. Defaults to 0 ("Off").
+        local coalesceValues = (stateId == "combat")
+            and PRESET_COALESCE_VALUES_COMBAT or PRESET_COALESCE_VALUES_DEFAULT
+        controls[#controls + 1] = {
+            type = "dropdown",
+            name = GetString(SI_BAV_SETTING_PRESET_COALESCE_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_COALESCE_TOOLTIP),
+            choices = BuildCoalesceLabels(coalesceValues),
+            choicesValues = coalesceValues,
+            getFunc = function() return Settings.GetPresetStateCoalesce(stateId) end,
+            setFunc = function(value) Settings.SetPresetStateCoalesce(stateId, value) end,
+            width = "full",
+            default = 0,
+            disabled = PresetsDisabled,
+            reference = def.reference .. "Coalesce",
         }
     end
     return controls
