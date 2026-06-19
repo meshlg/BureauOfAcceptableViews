@@ -1198,11 +1198,11 @@ end
         },
         {
             type = "header",
-            name = GetString(SI_BAV_HEADER_ACTIONS),
+            name = GetString(SI_BAV_HEADER_CONFIGURATION),
         },
         {
             type = "description",
-            text = GetString(SI_BAV_SECTION_ACTIONS_DESCRIPTION),
+            text = GetString(SI_BAV_SECTION_CONFIGURATION_DESCRIPTION),
             width = "full",
         },
         {
@@ -1210,7 +1210,7 @@ end
             name = GetString(SI_BAV_SETTING_PRINT_CONFIG_NAME),
             tooltip = GetString(SI_BAV_SETTING_PRINT_CONFIG_TOOLTIP),
             func = function() Settings.PrintConfiguration() end,
-            width = "full",
+            width = "half",
             reference = "BAVSettingsPrintConfig",
         },
         {
@@ -1222,6 +1222,15 @@ end
             isDangerous = true,
             warning = GetString(SI_BAV_SETTING_RESET_CONFIG_CONFIRM),
             reference = "BAVSettingsResetConfig",
+        },
+        {
+            type = "header",
+            name = GetString(SI_BAV_HEADER_CAMERA_ACTIONS),
+        },
+        {
+            type = "description",
+            text = GetString(SI_BAV_SECTION_CAMERA_ACTIONS_DESCRIPTION),
+            width = "full",
         },
         {
             type = "button",
@@ -1240,10 +1249,9 @@ end
             reference = "BAVSettingsResetCameraNote",
         },
         {
-            type = "submenu",
+            type = "header",
             name = GetString(SI_BAV_HEADER_DEBUG),
-            tooltip = GetString(SI_BAV_SECTION_DEBUG_DESCRIPTION),
-            controls = {
+        },
         {
             type = "description",
             text = GetString(SI_BAV_SECTION_DEBUG_DESCRIPTION),
@@ -1257,11 +1265,33 @@ end
             choicesValues = {0, 1, 2, 3, 4},
             getFunc = function() return addon.debugMode end,
             setFunc = function(value) Settings.SetDebugMode(value, true) end,
-            default = 0,
+            default = 1,
             width = "full",
             reference = "BAVSettingsDebugMode",
         },
-            },
+        {
+            type = "button",
+            name = GetString(SI_BAV_SETTING_SELFCHECK_NAME),
+            tooltip = GetString(SI_BAV_SETTING_SELFCHECK_TOOLTIP),
+            func = function()
+                if addon.SelfCheck and addon.SelfCheck.Run then
+                    addon.SelfCheck.Run(true)
+                end
+            end,
+            width = "half",
+            reference = "BAVSettingsSelfCheck",
+        },
+        {
+            type = "button",
+            name = GetString(SI_BAV_SETTING_DUMP_STATE_NAME),
+            tooltip = GetString(SI_BAV_SETTING_DUMP_STATE_TOOLTIP),
+            func = function()
+                if private.DumpFullState then
+                    private.DumpFullState()
+                end
+            end,
+            width = "half",
+            reference = "BAVSettingsDumpState",
         },
         {
             type = "description",

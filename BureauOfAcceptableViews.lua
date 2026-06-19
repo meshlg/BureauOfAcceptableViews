@@ -5,8 +5,8 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.6.19061633",
-    debugMode = 0,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
+    version = "1.6.19061823",
+    debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
 local private = {}
@@ -434,17 +434,27 @@ local function PreHookToggleGameCameraFirstPerson()
     local sourceName = GetLocalizedSourceName("ToggleFPV")
     LogDebug(SI_BAV_LOG_SOURCE_CALLED, sourceName)
     
-    -- Race condition protection: prevent re-entrant calls
+    -- Re-entrancy / rapid-repeat protection.
+    -- ---------------------------------------------------------------------------
+    -- These two guards must PASS THROUGH to the engine (return false), never block
+    -- (return true). Other addons legitimately call ToggleGameCameraFirstPerson()
+    -- programmatically -- notably PvpAlerts, which toggles FPV twice back-to-back
+    -- in the same frame to measure render-space camera coordinates, expecting both
+    -- toggles to actually execute and net to no visible change. If we BLOCKED the
+    -- second (rapid) call, that balanced pair would be broken: the camera would be
+    -- left stuck in first person, the next measurement cycle would toggle it once
+    -- more, and the view would oscillate FPP<->TPP every cycle. So on a rapid or
+    -- re-entrant call we simply decline to run OUR free-zoom handling and let the
+    -- engine perform its default toggle, leaving such pairs balanced.
     if isTogglingFPV then
         LogDebug(SI_BAV_LOG_TOGGLE_BLOCKED_REENTRANT)
-        return true  -- Block while already processing
+        return false  -- Pass through: don't break a programmatic toggle pair
     end
-    
-    -- Cooldown protection: prevent rapid spamming
+
     local currentTime = GetGameTimeMilliseconds()
     if currentTime - fpvToggleTime < FPV_TOGGLE_COOLDOWN then
         LogDebug(SI_BAV_LOG_TOGGLE_BLOCKED_COOLDOWN)
-        return true  -- Block if called too quickly
+        return false  -- Pass through: don't break a programmatic toggle pair
     end
     
     -- Don't interfere with siege weapons - let original function handle it
@@ -903,6 +913,7 @@ private.GetCameraZoom = GetCameraZoom
 private.NormalizeSavedCurrentZoom = NormalizeSavedCurrentZoom
 private.SaveCameraState = SaveCameraState
 private.ResetCameraState = ResetCameraState
+private.DumpFullState = DumpFullState
 
 local function HandleConfigCommand(args)
     return GetSettingsModule().HandleConfigCommand(args)

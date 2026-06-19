@@ -1,6 +1,6 @@
-## Title: Bureau of Acceptable Views |c6FCB9Fv1.6.19061633|r
-## Version: 1.6.19061633
-## AddOnVersion: 1600
+## Title: Bureau of Acceptable Views |c6FCB9Fv1.6.19061823|r
+## Version: 1.6.19061823
+## AddOnVersion: 1601
 ## Author: |c6FCB9Fmeshlg|r
 ## APIVersion: 101050
 ## Description: Allows the player to zoom freely between max zoom and first person view in restricted states, with configurable persistence, localization, and a settings panel. Controller input falls back to the game's default camera handling.
@@ -8,9 +8,12 @@
 ## OptionalDependsOn: LibAddonMenu-2.0>=43 LibSprint
 
 
-
+; Localization files are loaded in the following order, with later files overriding earlier ones. This allows for a default English localization to be provided, while still allowing users to create their own localizations without needing to copy the entire file.
 Localization/en.lua
 Localization/$(language).lua
+; ---------------------------------------------------------------------------
+
+; The main addon files are loaded in the following order, with later files overriding earlier ones. This allows for a clear separation of concerns and modularity in the codebase.
 BureauOfAcceptableViews.lua
 CameraSettings.lua
 DynamicFov.lua
@@ -18,6 +21,7 @@ FovArbiter.lua
 SelfCheck.lua
 ContextPresets.lua
 Settings.lua
+; ---------------------------------------------------------------------------
 
 
 
