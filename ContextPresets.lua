@@ -32,9 +32,11 @@ local ContextPresets = addon.ContextPresets
 local CameraSettings = addon.CameraSettings
 
 -- Hot-path / library globals bound to locals once at load.
-local ipairs  = ipairs
-local pairs   = pairs
-local type    = type
+local ipairs   = ipairs
+local pairs    = pairs
+local type     = type
+local tonumber = tonumber
+local mathhuge = math.huge
 
 -- Engine handles for the temporary transition-glide updater. Bound once at load
 -- like DynamicFov does; the updater itself only exists while a glide runs.
@@ -267,7 +269,7 @@ for rank, stateId in ipairs(STATE_PRIORITY) do
     STATE_RANK[stateId] = rank
 end
 local function PriorityRank(stateId)
-    return STATE_RANK[stateId] or math.huge
+    return STATE_RANK[stateId] or mathhuge
 end
 
 -- Fixed cinematic bundles, expressed as OFFSETS from the player's own camera
@@ -806,11 +808,13 @@ local function ScheduleCoalesce(delayMs)
 end
 
 -- Recompute the active state from current inputs and apply per the fast-
--- escalate / slow-release rule: an escalation (or any change while a release is
--- already pending, which re-resolves the latest state) applies immediately; a
--- de-escalation toward a lower-priority state is deferred by the leaving state's
--- own release window (CoalesceDelayFor) so a quick out-and-back collapses to a
--- no-op instead of jittering the camera.
+-- escalate / slow-release rule: an escalation (resolved state outranks the active
+-- one) applies immediately and cancels any pending release; a de-escalation toward
+-- a lower-priority state is deferred by the leaving state's own release window
+-- (CoalesceDelayFor) so a quick out-and-back collapses to a no-op instead of
+-- jittering the camera. If a release timer is already armed, ScheduleCoalesce
+-- leaves it in place -- it re-resolves the latest state when it fires, so the
+-- newest change is still honoured without pushing the settle point further out.
 local function Reevaluate()
     if not controller.enabled then
         return
@@ -836,8 +840,9 @@ local function Reevaluate()
 
     -- De-escalation: defer by the slow-release window of the state we are LEAVING,
     -- so a fast re-escalation inside that window cancels it. Each state carries its
-    -- own delay (combat damps hard at 2500 ms; the rest use small per-state
-    -- debounces). A delay of 0 or below means release immediately.
+    -- own release delay, user-configured in the panel and pushed in via Configure;
+    -- every state ships at 0 (release immediately) until the user opts one into a
+    -- delay. A delay of 0 or below means release immediately.
     local delay = CoalesceDelayFor(controller.activeState)
     if delay > 0 then
         ScheduleCoalesce(delay)
@@ -976,14 +981,22 @@ end
 --
 -- FALLBACK (no LibSprint): read the Shift key (ESO's default sprint bind) via
 -- IsShiftKeyDown(), gated on IsPlayerMoving() so holding Shift while standing
--- still or in menus does not trigger the sprint preset. This assumes the player
--- kept the default Shift bind; if they rebound it, detection will not match.
+-- still does not trigger the sprint preset, AND on the game camera owning input
+-- (not IsGameCameraUIModeActive()) so holding Shift while moving in a menu/cursor
+-- mode -- inventory, map, the options window -- is not mistaken for sprinting.
+-- This still assumes the player kept the default Shift bind; if they rebound
+-- sprint (or use Shift for something else), detection will not match. Install
+-- LibSprint for bind-agnostic, gamepad-correct detection -- it is the preferred
+-- path and is used whenever present.
 local function IsPlayerSprinting()
     local lib = LibSprint
     if lib ~= nil and lib.isPlayerSprinting ~= nil then
         return lib.isPlayerSprinting and true or false
     end
     -- Fallback heuristic when LibSprint is not installed.
+    if IsGameCameraUIModeActive and IsGameCameraUIModeActive() then
+        return false
+    end
     return IsShiftKeyDown() and IsPlayerMoving()
 end
 

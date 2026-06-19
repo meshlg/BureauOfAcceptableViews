@@ -1,6 +1,6 @@
-## Title: Bureau of Acceptable Views |c6FCB9Fv1.5.16061515|r
-## Version: 1.5.16061515
-## AddOnVersion: 151
+## Title: Bureau of Acceptable Views |c6FCB9Fv1.6.19061633|r
+## Version: 1.6.19061633
+## AddOnVersion: 1600
 ## Author: |c6FCB9Fmeshlg|r
 ## APIVersion: 101050
 ## Description: Allows the player to zoom freely between max zoom and first person view in restricted states, with configurable persistence, localization, and a settings panel. Controller input falls back to the game's default camera handling.
