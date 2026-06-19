@@ -80,6 +80,22 @@ unsupported); context presets stay disabled until you switch them on.
 - Skips itself entirely while you are in combat, so a check never lands on a
   busy moment.
 
+### Conflict resilience *(automatic safety net)*
+- Because BAV hooks the game's own first-person toggle, another addon that
+  drives that toggle can, in rare cases, fight it and make the view flicker
+  between first and third person. BAV watches for that: if the view flips back
+  and forth at a rate no human could produce, it **steps its own handling
+  aside** (passes the toggle straight to the game) to break the loop.
+- The backoff is fully **reversible** and touches none of your saved settings —
+  it clears the moment you relog or use `/bav reset`.
+- When it triggers, a single **neutral** chat notice explains what happened and
+  suggests disabling addons one at a time to find the source. It never names or
+  blames another addon — a hooked function cannot reliably know who called it,
+  so guessing would be misleading.
+- The notice can be turned off in **Settings → Diagnostics** (the safety step
+  itself always runs; the toggle only controls the chat message). `/bav
+  selfcheck` always reports the current backoff status.
+
 ---
 
 ## Why it's built well
@@ -103,6 +119,11 @@ unsupported); context presets stay disabled until you switch them on.
   invariants and watches the footprint of its own tables at quiet moments,
   turning silent bugs into a single readable warning — without adding any
   per-frame cost.
+- **Plays nicely with others.** BAV shares the game's first-person toggle with
+  any addon that uses it. It balances the rapid same-frame toggle pairs other
+  addons use to measure the camera, and if it ever detects a runaway view
+  flicker it steps its own handling aside — a reversible safety net that needs
+  no configuration and never blames another addon.
 - **Localized** with English and Russian strings, and a clean LibAddonMenu
   settings panel.
 

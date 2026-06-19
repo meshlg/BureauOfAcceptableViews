@@ -179,6 +179,11 @@ local DEFAULT_SAVED_VARS = {
     -- player's settings (and then re-snapshotting those dirty values, which
     -- compounds every session). nil whenever no preset is overriding the camera.
     presetRestoreSnapshot = nil,
+    -- Conflict advisory: when on, a single neutral chat notice is shown if the
+    -- addon detects runaway view oscillation (a likely addon interaction) and
+    -- backs its FPV hook off. On by default; purely a chat-noise toggle -- the
+    -- backoff itself always runs as a safety net regardless of this setting.
+    conflictAdvisoryEnabled = true,
 }
 
 ---@type BAVSavedVars|nil (accessible via private.savedVars after initialization)
@@ -276,6 +281,13 @@ end
 function Settings.IsDynamicFovEnabled()
     local vars = GetSavedVarsOrDefaults()
     return NormalizeBoolean(vars.dynamicFovEnabled, true)
+end
+
+-- Whether the conflict advisory chat notice is enabled. Defaults on. Only gates
+-- the one-time chat message; the oscillation backoff runs regardless.
+function Settings.IsConflictAdvisoryEnabled()
+    local vars = GetSavedVarsOrDefaults()
+    return NormalizeBoolean(vars.conflictAdvisoryEnabled, true)
 end
 
 -- Whether FOV changes between zoom steps should glide rather than snap. Purely
@@ -685,6 +697,9 @@ function Settings.ResetConfigurationToDefaults(suppressOutput)
         combat = 0, werewolf = 0, stealth = 0, interaction = 0,
         mounted = 0, swimming = 0, sprint = 0,
     }
+    -- The advisory is a neutral safety-net notice, so a reset restores it to the
+    -- shipped "on" default rather than switching it off with the camera features.
+    savedVars.conflictAdvisoryEnabled = true
     Settings.ApplyConfigurationChanges()
 
     if not suppressOutput then
@@ -1292,6 +1307,21 @@ end
             end,
             width = "half",
             reference = "BAVSettingsDumpState",
+        },
+        {
+            -- Neutral safety-net notice. The oscillation backoff always runs; this
+            -- only controls whether the one-time chat advisory is shown.
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_CONFLICT_ADVISORY_NAME),
+            tooltip = GetString(SI_BAV_SETTING_CONFLICT_ADVISORY_TOOLTIP),
+            getFunc = function() return Settings.IsConflictAdvisoryEnabled() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.conflictAdvisoryEnabled = value and true or false end
+            end,
+            width = "full",
+            default = true,
+            reference = "BAVSettingsConflictAdvisory",
         },
         {
             type = "description",

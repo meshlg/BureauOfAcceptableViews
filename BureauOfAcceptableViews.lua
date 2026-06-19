@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.6.19061823",
+    version = "1.6.19062002",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -34,6 +34,7 @@ local stringlower   = string.lower
 local tableinsert   = table.insert
 local mathmax       = math.max
 local mathmin       = math.min
+local GetFrameTimeMilliseconds = GetFrameTimeMilliseconds
 
 -- Localization/chat helpers
 local CHAT_PREFIX = "|c6FCB9F[Bureau Of Acceptable Views|r "
@@ -184,10 +185,39 @@ local SAVE_DELAY_MS = 1000
 local SAVE_TIMER_NAME = ADDON_NAME .. "_QueuedSave"
 
 
--- Race condition protection for FPV toggle
+-- Re-entrancy + programmatic-pair protection for the FPV toggle.
+-- ---------------------------------------------------------------------------
+-- isTogglingFPV guards true re-entrancy (our own SetCameraZoom re-entering the
+-- hook synchronously). The frame-pair fields below handle a DIFFERENT case: an
+-- addon (e.g. PvpAlerts) that calls ToggleGameCameraFirstPerson() twice in the
+-- SAME rendered frame to measure the camera, expecting the pair to net to no
+-- visible change. A human can physically toggle at most once per frame, so a
+-- second toggle within one frame is always programmatic; we use that invariant
+-- (not any addon-specific check) to keep such pairs balanced for ANY caller.
 local isTogglingFPV = false          -- Flag to prevent re-entrant calls
-local fpvToggleTime = 0              -- Timestamp of last toggle
-local FPV_TOGGLE_COOLDOWN = 100      -- Minimum ms between toggles
+local lastToggleFrameMs = nil        -- frame time of the toggle we last processed
+local lastToggleBlocked = false      -- did we handle (block the engine on) it?
+local lastTogglePrevZoom = nil       -- zoom before our change, for same-frame undo
+
+-- Runaway-oscillation detector + reversible backoff.
+-- ---------------------------------------------------------------------------
+-- A safety net for FUTURE, unknown addon conflicts (the PvpAlerts case is
+-- already fixed by the same-frame pairing above). If something drives the view
+-- to flip first-person<->third-person at a rate no human could produce, we stop
+-- OUR hook from participating: it goes passive (pass every call straight to the
+-- engine = vanilla behavior), breaking our side of the loop. This is purely a
+-- session-local runtime flag -- it touches no SavedVariables and is undone by a
+-- relog or `/bav reset`. We deliberately do NOT name or blame any addon (a
+-- ZO_PreHook cannot know its caller) and we only count REAL view flips we
+-- observe through our own hook -- never a timer/poll, honoring the addon's
+-- event-driven contract.
+local OSCILLATION_WINDOW_MS       = 3000  -- sliding window for counting view flips
+local OSCILLATION_FLIP_THRESHOLD  = 8     -- flips within the window that trip backoff
+
+local viewFlipTimestamps = {}    -- sliding window of observed real-flip times (ms)
+local lastObservedFpv    = nil   -- last observed FPV-ness, to detect a real flip
+local togglePassive      = false -- backoff: when true, our FPV hook is a no-op
+local oscillationWarned  = false -- session throttle for the advisory message
 
 -- Helper function to check if zoom value is valid
 local function IsValidZoom(zoom)
@@ -428,44 +458,119 @@ local function IsZoomLimited()
     return IsMounted() or IsWerewolf() or IsUnitSwimming("player")
 end
 
+-- Emit the conflict advisory once per session. Reads the user toggle lazily (no
+-- push needed): when the advisory is off we stay silent in chat but still log at
+-- warn level, so /bav selfcheck can surface the backoff either way.
+local function RaiseOscillationAdvisory()
+    local settings = BureauOfAcceptableViews.Settings
+    local advisoryOn = not (settings and settings.IsConflictAdvisoryEnabled)
+        or settings.IsConflictAdvisoryEnabled()
+
+    if advisoryOn and not oscillationWarned then
+        ChatInfo(SI_BAV_MSG_CONFLICT_ADVISORY)
+        oscillationWarned = true
+    end
+    LogWarn(SI_BAV_LOG_OSCILLATION_BACKOFF)
+end
+
+-- Record a REAL view flip (FPV<->third person) observed through our own hook and
+-- trip the reversible backoff if flips exceed the threshold within the sliding
+-- window. Counts only genuine state changes -- never raw hook calls -- so the
+-- balanced same-frame measurement pairs other addons make do not register. No
+-- timer/poll: this runs only when the engine already called the toggle.
+local function NoteViewStateAndCheckOscillation(nowMs)
+    local isFpv = GetCameraZoom() <= ZOOM_FPV
+    if lastObservedFpv == nil then
+        lastObservedFpv = isFpv
+        return
+    end
+    if isFpv == lastObservedFpv then
+        return  -- no actual flip; nothing to record
+    end
+    lastObservedFpv = isFpv
+
+    -- Append this flip, then drop any timestamps that fell out of the window.
+    viewFlipTimestamps[#viewFlipTimestamps + 1] = nowMs
+    local cutoff = nowMs - OSCILLATION_WINDOW_MS
+    local kept = {}
+    for i = 1, #viewFlipTimestamps do
+        if viewFlipTimestamps[i] >= cutoff then
+            kept[#kept + 1] = viewFlipTimestamps[i]
+        end
+    end
+    viewFlipTimestamps = kept
+
+    if not togglePassive and #viewFlipTimestamps >= OSCILLATION_FLIP_THRESHOLD then
+        togglePassive = true
+        RaiseOscillationAdvisory()
+    end
+end
+
 -- Pre-hook for ToggleGameCameraFirstPerson
 -- Returns true to block original function, false/nil to allow it
 local function PreHookToggleGameCameraFirstPerson()
     local sourceName = GetLocalizedSourceName("ToggleFPV")
     LogDebug(SI_BAV_LOG_SOURCE_CALLED, sourceName)
-    
-    -- Re-entrancy / rapid-repeat protection.
-    -- ---------------------------------------------------------------------------
-    -- These two guards must PASS THROUGH to the engine (return false), never block
-    -- (return true). Other addons legitimately call ToggleGameCameraFirstPerson()
-    -- programmatically -- notably PvpAlerts, which toggles FPV twice back-to-back
-    -- in the same frame to measure render-space camera coordinates, expecting both
-    -- toggles to actually execute and net to no visible change. If we BLOCKED the
-    -- second (rapid) call, that balanced pair would be broken: the camera would be
-    -- left stuck in first person, the next measurement cycle would toggle it once
-    -- more, and the view would oscillate FPP<->TPP every cycle. So on a rapid or
-    -- re-entrant call we simply decline to run OUR free-zoom handling and let the
-    -- engine perform its default toggle, leaving such pairs balanced.
-    if isTogglingFPV then
-        LogDebug(SI_BAV_LOG_TOGGLE_BLOCKED_REENTRANT)
-        return false  -- Pass through: don't break a programmatic toggle pair
+
+    -- Backoff: once runaway oscillation has been detected this session, our hook
+    -- stays out of the way entirely (vanilla pass-through) until /bav reset or a
+    -- relog clears it. Checked first so we add zero behavior while backed off.
+    if togglePassive then
+        return false
     end
 
-    local currentTime = GetGameTimeMilliseconds()
-    if currentTime - fpvToggleTime < FPV_TOGGLE_COOLDOWN then
-        LogDebug(SI_BAV_LOG_TOGGLE_BLOCKED_COOLDOWN)
-        return false  -- Pass through: don't break a programmatic toggle pair
+    -- True re-entrancy: our own SetCameraZoom must never recurse into this hook.
+    -- Pass through (don't block) so we never break a caller's toggle.
+    if isTogglingFPV then
+        LogDebug(SI_BAV_LOG_TOGGLE_BLOCKED_REENTRANT)
+        return false
     end
-    
+
+    -- Same-frame programmatic pair handling.
+    -- ---------------------------------------------------------------------------
+    -- A second toggle within the SAME rendered frame can only be programmatic (a
+    -- human toggles at most once per frame). An addon like PvpAlerts toggles FPV
+    -- and immediately back in one frame to measure the camera, expecting the pair
+    -- to net to zero. We must not leave the camera desynced after such a pair:
+    --   * If we PASSED the first toggle to the engine (normal third person), pass
+    --     the second too -- the engine's own pair balances.
+    --   * If we HANDLED the first (limited state / FPV: we changed zoom and blocked
+    --     the engine), the engine never moved, so the partner toggle would now
+    --     desync the view. Undo our zoom change, block the engine again, and the
+    --     frame ends exactly where it started.
+    local frameMs = GetFrameTimeMilliseconds()
+    if lastToggleFrameMs == frameMs then
+        if lastToggleBlocked and lastTogglePrevZoom ~= nil then
+            LogDebug(SI_BAV_LOG_TOGGLE_PAIR_UNDO)
+            SetCameraZoom(lastTogglePrevZoom)
+            -- Consume the undo so a (pathological) third same-frame toggle is
+            -- treated as a fresh first toggle rather than undoing again.
+            lastToggleBlocked = false
+            lastTogglePrevZoom = nil
+            return true  -- keep the engine out; our undo restored the start state
+        end
+        LogDebug(SI_BAV_LOG_TOGGLE_PAIR_PASS)
+        return false  -- first toggle was passed through; let the engine balance
+    end
+
+    -- Genuine (non-paired) toggle for this frame: fold it into the runaway
+    -- detector. This may trip backoff; if so, go passive immediately and pass
+    -- this call straight through to the engine.
+    NoteViewStateAndCheckOscillation(GetGameTimeMilliseconds())
+    if togglePassive then
+        return false
+    end
+
     -- Don't interfere with siege weapons - let original function handle it
     if IsGameCameraSiegeControlled() then
         LogInfo(SI_BAV_LOG_TOGGLE_SIEGE_PASS)
         return false  -- Allow original function to execute
     end
     
-    -- Set protection flags
+    -- Set re-entrancy flag and remember the zoom BEFORE we touch anything, so a
+    -- same-frame partner toggle can undo our change exactly.
     isTogglingFPV = true
-    fpvToggleTime = currentTime
+    local prevZoom = GetCameraZoom()
 
     local function HandleToggle()
         local zoom = GetCameraZoom()
@@ -515,8 +620,22 @@ local function PreHookToggleGameCameraFirstPerson()
 
     if not ok then
         LogError(SI_BAV_LOG_TOGGLE_UNHANDLED_ERROR, tostring(result))
+        -- Record this frame so a same-frame partner toggle is recognized, but mark
+        -- it as not-blocked: an errored handler did not reliably change zoom, so
+        -- there is nothing to undo and we let the engine handle the partner.
+        lastToggleFrameMs = frameMs
+        lastToggleBlocked = false
+        lastTogglePrevZoom = nil
         return false
     end
+
+    -- Remember what this toggle did so a second toggle in the SAME frame can keep
+    -- the pair balanced: if we blocked the engine (result == true) we stash the
+    -- pre-change zoom so the partner can undo it; if we passed through, the partner
+    -- passes through too.
+    lastToggleFrameMs = frameMs
+    lastToggleBlocked = result and true or false
+    lastTogglePrevZoom = result and prevZoom or nil
 
     return result
 end
@@ -870,6 +989,13 @@ local function ResetCameraState(suppressOutput)
         ContextPresets.EmergencyRestore()
     end
 
+    -- Clear the oscillation backoff: /bav reset is the explicit recovery point, so
+    -- the FPV hook resumes normal handling and the detector starts fresh.
+    togglePassive = false
+    oscillationWarned = false
+    viewFlipTimestamps = {}
+    lastObservedFpv = nil
+
     local resetZoom = GetConfiguredMinMountedZoom()
     lastZoom = resetZoom
 
@@ -914,6 +1040,16 @@ private.NormalizeSavedCurrentZoom = NormalizeSavedCurrentZoom
 private.SaveCameraState = SaveCameraState
 private.ResetCameraState = ResetCameraState
 private.DumpFullState = DumpFullState
+
+-- Read-only conflict/backoff diagnostics for SelfCheck and /bav dump. Returns a
+-- fresh flat table so callers cannot mutate detector state.
+function private.GetConflictDiagnostics()
+    return {
+        togglePassive   = togglePassive,
+        flipsInWindow   = #viewFlipTimestamps,
+        oscillationWarned = oscillationWarned,
+    }
+end
 
 local function HandleConfigCommand(args)
     return GetSettingsModule().HandleConfigCommand(args)

@@ -45,6 +45,8 @@ local strings = {
     SI_BAV_SETTING_SELFCHECK_TOOLTIP = "Run the reliability self-check now: validate the addon's internal invariants and report its owned-data footprint to chat. Healthy results are reported too (unlike the automatic, silent pass).",
     SI_BAV_SETTING_DUMP_STATE_NAME = "Dump full state",
     SI_BAV_SETTING_DUMP_STATE_TOOLTIP = "Print a full snapshot of the addon's current camera and player state to chat, for troubleshooting or bug reports.",
+    SI_BAV_SETTING_CONFLICT_ADVISORY_NAME = "Conflict advisory in chat",
+    SI_BAV_SETTING_CONFLICT_ADVISORY_TOOLTIP = "If another addon drives the camera to flip view rapidly, BAV steps its own handling aside to break the loop. When this is on, it also prints a one-time neutral notice to chat. The safety step always runs; this only controls the chat message.",
 
     SI_BAV_SETTING_DYNAMIC_FOV_ENABLED_NAME = "Enable dynamic field of view",
     SI_BAV_SETTING_DYNAMIC_FOV_ENABLED_TOOLTIP = "When enabled, the third-person field of view eases between a near and far value as you zoom in and out.",
@@ -114,7 +116,9 @@ local strings = {
     SI_BAV_LOG_SET_APPLY_FAILED = "SetCameraZoom: Failed to apply requested zoom=%.2f",
     SI_BAV_LOG_SET_APPLIED = "SetCameraZoom: applied requested zoom=%.2f",
     SI_BAV_LOG_TOGGLE_BLOCKED_REENTRANT = "ToggleFPV: Blocked (re-entrant)",
-    SI_BAV_LOG_TOGGLE_BLOCKED_COOLDOWN = "ToggleFPV: Blocked (cooldown)",
+    SI_BAV_LOG_TOGGLE_PAIR_PASS = "ToggleFPV: Same-frame partner toggle - passing to game",
+    SI_BAV_LOG_TOGGLE_PAIR_UNDO = "ToggleFPV: Same-frame partner toggle - undoing our change to keep the pair balanced",
+    SI_BAV_LOG_OSCILLATION_BACKOFF = "ToggleFPV: Runaway view oscillation detected - FPV hook backed off (passive) until /bav reset or relog",
     SI_BAV_LOG_TOGGLE_SIEGE_PASS = "ToggleFPV: Siege controlled - passing to game",
     SI_BAV_LOG_TOGGLE_STATE = "ToggleFPV: zoom=%.2f, isLimited=%s, lastZoom=%.2f",
     SI_BAV_LOG_TOGGLE_TO_THIRD = "ToggleFPV: FPV -> Third Person (target=%.2f)",
@@ -155,6 +159,7 @@ local strings = {
     SI_BAV_LOG_LAM_MISSING = "LibAddonMenu-2.0 not found. The settings panel is unavailable, but slash commands will continue to work.",
 
     SI_BAV_MSG_FULL_STATE_DUMP = "========== FULL STATE DUMP ==========",
+    SI_BAV_MSG_CONFLICT_ADVISORY = "BAV noticed the camera view flipping rapidly between first and third person. This is usually an interaction between addons. BAV has stepped its own view handling aside to stop the flicker (until you relog or use /bav reset). If the flicker continues, try disabling other addons one at a time to find the source. Details: /bav selfcheck.",
     SI_BAV_MSG_VERSION_DEBUG = "Version: %s | Debug: %s (%d)",
     SI_BAV_MSG_ZOOM_VALUES = "--- Zoom Values ---",
     SI_BAV_MSG_CURRENT_SAVED = "Current: %.2f | Last: %.2f | SavedCurrent: %.2f | SavedLastTP: %.2f",
@@ -240,6 +245,8 @@ local strings = {
     SI_BAV_SELFCHECK_FOOTPRINT_GROWTH = "BAV's own data grew by %d entries since the last check (now %d). Watch for a leak.",
     SI_BAV_SELFCHECK_FOOTPRINT_REPORT = "BAV footprint: %d entries | since load: %+d | since last: %+d",
     SI_BAV_SELFCHECK_ALL_OK = "All invariants OK.",
+    SI_BAV_SELFCHECK_BACKOFF_ACTIVE = "FPV hook is backed off after detecting rapid view oscillation (%d flips in window). Use /bav reset or relog to resume normal handling.",
+    SI_BAV_SELFCHECK_BACKOFF_INACTIVE = "FPV hook active (no view oscillation detected).",
 
     SI_BAV_SCENARIO_TOGGLE_FPV = "toggle-fpv",
     SI_BAV_SCENARIO_ZOOM_IN = "zoom-in",

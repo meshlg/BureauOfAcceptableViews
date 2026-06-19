@@ -45,6 +45,8 @@ local strings = {
     [SI_BAV_SETTING_SELFCHECK_TOOLTIP] = "Запустить проверку надёжности сейчас: проверить внутренние инварианты аддона и вывести в чат объём занимаемых им данных. В отличие от автоматического тихого прохода, исправное состояние тоже отображается.",
     [SI_BAV_SETTING_DUMP_STATE_NAME] = "Полный дамп состояния",
     [SI_BAV_SETTING_DUMP_STATE_TOOLTIP] = "Вывести в чат полный снимок текущего состояния камеры и игрока — для диагностики или отчётов об ошибках.",
+    [SI_BAV_SETTING_CONFLICT_ADVISORY_NAME] = "Предупреждение о конфликте в чат",
+    [SI_BAV_SETTING_CONFLICT_ADVISORY_TOOLTIP] = "Если другой аддон заставляет камеру быстро переключать вид, BAV отступает со своей обработкой, чтобы разорвать петлю. Когда опция включена, в чат также выводится однократное нейтральное уведомление. Сама защита работает всегда; эта опция управляет только сообщением в чате.",
 
     [SI_BAV_SETTING_DYNAMIC_FOV_ENABLED_NAME] = "Включить динамическое поле зрения",
     [SI_BAV_SETTING_DYNAMIC_FOV_ENABLED_TOOLTIP] = "Если включено, поле зрения от третьего лица плавно меняется между ближним и дальним значением по мере приближения и отдаления камеры.",
@@ -114,7 +116,9 @@ local strings = {
     [SI_BAV_LOG_SET_APPLY_FAILED] = "SetCameraZoom: Не удалось применить запрошенный зум=%.2f",
     [SI_BAV_LOG_SET_APPLIED] = "SetCameraZoom: применён запрошенный зум=%.2f",
     [SI_BAV_LOG_TOGGLE_BLOCKED_REENTRANT] = "ToggleFPV: Заблокировано (повторный вход)",
-    [SI_BAV_LOG_TOGGLE_BLOCKED_COOLDOWN] = "ToggleFPV: Заблокировано (кулдаун)",
+    [SI_BAV_LOG_TOGGLE_PAIR_PASS] = "ToggleFPV: Парный тогл в том же кадре — передаём игре",
+    [SI_BAV_LOG_TOGGLE_PAIR_UNDO] = "ToggleFPV: Парный тогл в том же кадре — откатываем своё изменение, чтобы пара осталась сбалансированной",
+    [SI_BAV_LOG_OSCILLATION_BACKOFF] = "ToggleFPV: Обнаружена неуправляемая осцилляция вида — хук FPV переведён в пассивный режим до /bav reset или перезахода",
     [SI_BAV_LOG_TOGGLE_SIEGE_PASS] = "ToggleFPV: Управление осадным орудием — передаём игре",
     [SI_BAV_LOG_TOGGLE_STATE] = "ToggleFPV: zoom=%.2f, isLimited=%s, lastZoom=%.2f",
     [SI_BAV_LOG_TOGGLE_TO_THIRD] = "ToggleFPV: FPV -> Third Person (цель=%.2f)",
@@ -155,6 +159,7 @@ local strings = {
     [SI_BAV_LOG_LAM_MISSING] = "LibAddonMenu-2.0 не найден. Панель настроек недоступна, но slash-команды продолжат работать.",
 
     [SI_BAV_MSG_FULL_STATE_DUMP] = "========== ПОЛНЫЙ ДАМП СОСТОЯНИЯ ==========",
+    [SI_BAV_MSG_CONFLICT_ADVISORY] = "BAV заметил частое переключение вида камеры между первым и третьим лицом. Обычно это взаимодействие между аддонами. BAV отступил со своей обработкой вида, чтобы прекратить мерцание (до перезахода или /bav reset). Если мерцание продолжится — попробуйте отключать другие аддоны по одному, чтобы найти источник. Детали: /bav selfcheck.",
     [SI_BAV_MSG_VERSION_DEBUG] = "Версия: %s | Отладка: %s (%d)",
     [SI_BAV_MSG_ZOOM_VALUES] = "--- Значения зума ---",
     [SI_BAV_MSG_CURRENT_SAVED] = "Текущий: %.2f | Last: %.2f | SavedCurrent: %.2f | SavedLastTP: %.2f",
@@ -240,6 +245,8 @@ local strings = {
     [SI_BAV_SELFCHECK_FOOTPRINT_GROWTH] = "Данные самого BAV выросли на %d записей с прошлой проверки (сейчас %d). Возможна утечка.",
     [SI_BAV_SELFCHECK_FOOTPRINT_REPORT] = "След BAV: %d записей | с загрузки: %+d | с прошлой: %+d",
     [SI_BAV_SELFCHECK_ALL_OK] = "Все инварианты в норме.",
+    [SI_BAV_SELFCHECK_BACKOFF_ACTIVE] = "Хук FPV переведён в пассивный режим после обнаружения быстрой осцилляции вида (%d переключений в окне). Используйте /bav reset или перезайдите, чтобы вернуть обычную обработку.",
+    [SI_BAV_SELFCHECK_BACKOFF_INACTIVE] = "Хук FPV активен (осцилляция вида не обнаружена).",
 
     [SI_BAV_SCENARIO_TOGGLE_FPV] = "toggle-fpv",
     [SI_BAV_SCENARIO_ZOOM_IN] = "zoom-in",

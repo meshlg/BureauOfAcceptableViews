@@ -378,6 +378,18 @@ function SelfCheck.Run(verbose)
     if verbose then
         ChatInfo(SI_BAV_SELFCHECK_FOOTPRINT_REPORT,
             currentEntries, growthSinceBase or 0, growthSinceLast or 0)
+
+        -- Report-only backoff status: the detector itself owns the chat advisory,
+        -- so here we just surface whether the FPV hook is currently backed off.
+        if private.GetConflictDiagnostics then
+            local conflict = private.GetConflictDiagnostics()
+            if conflict.togglePassive then
+                ChatInfo(SI_BAV_SELFCHECK_BACKOFF_ACTIVE, conflict.flipsInWindow)
+            else
+                ChatInfo(SI_BAV_SELFCHECK_BACKOFF_INACTIVE)
+            end
+        end
+
         if #problems == 0 then
             ChatInfo(SI_BAV_SELFCHECK_ALL_OK)
         end
