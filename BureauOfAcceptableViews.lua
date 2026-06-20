@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.6.19062002",
+    version = "1.7.20061354",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -37,8 +37,8 @@ local mathmin       = math.min
 local GetFrameTimeMilliseconds = GetFrameTimeMilliseconds
 
 -- Localization/chat helpers
-local CHAT_PREFIX = "|c6FCB9F[Bureau Of Acceptable Views|r "
-local CHAT_ERROR_PREFIX = "|cFF0000[Bureau Of Acceptable Views|r "
+local CHAT_PREFIX = "|c6FCB9F[Bureau Of Acceptable Views]|r: "
+local CHAT_ERROR_PREFIX = "|cFF0000[Bureau Of Acceptable Views]|r: "
 
 local DEBUG_LEVEL_STRING_IDS = {
     SI_BAV_DEBUG_LEVEL_OFF,
@@ -152,7 +152,7 @@ local ZOOM_FPV                     = 0.0   -- First person view zoom
 local ZOOM_STEP                    = 0.3   -- Default zoom step size
 local PRESERVE_FPV_BETWEEN_ZONES   = true  -- Default behavior: keep FPV across relogs and zone changes
 local ZOOM_STEP_MIN                = 0.05  -- Minimum configurable zoom step
-local ZOOM_STEP_MAX                = 5.0   -- Maximum configurable zoom step
+local ZOOM_STEP_MAX                = 2.25   -- Maximum configurable zoom step
 local CONFIG_MIN_THIRD_PERSON_ZOOM = 0.10  -- Lowest sensible configurable third-person fallback zoom
 
 private.constants = {

@@ -12,7 +12,7 @@ local ZOOM_FPV = constants.ZOOM_FPV or 0.0
 local ZOOM_STEP = constants.ZOOM_STEP or 0.35
 local PRESERVE_FPV_BETWEEN_ZONES = constants.PRESERVE_FPV_BETWEEN_ZONES
 local ZOOM_STEP_MIN = constants.ZOOM_STEP_MIN or 0.05
-local ZOOM_STEP_MAX = constants.ZOOM_STEP_MAX or 5.0
+local ZOOM_STEP_MAX = constants.ZOOM_STEP_MAX or 2.25
 local CONFIG_MIN_THIRD_PERSON_ZOOM = constants.CONFIG_MIN_THIRD_PERSON_ZOOM or 0.10
 
 -- Single source of truth for context-preset states: drives the SavedVariables
