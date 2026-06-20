@@ -242,6 +242,56 @@ function Reassert()
 end
 
 -- ---------------------------------------------------------------------------
+-- Velocity-reactive FOV boost routing
+-- ---------------------------------------------------------------------------
+
+-- Entry point for VelocityFov. The boost (degrees) is added on top of whatever
+-- base FOV DynamicFov computes (zoom interpolation, or the player's manual FOV when
+-- zoom-based FOV is off). Routing it through the arbiter means it obeys the same
+-- single-owner precedence as the dynamic path: while a hold is active the boost is
+-- stored but NOT applied, so a preset's pinned FOV is never stomped; when the hold
+-- ends, EndHold -> Reassert re-renders base + boost. Returns true when a write
+-- actually happened.
+function FovArbiter.SetVelocityBoost(boost)
+    if not addon.DynamicFov or not addon.DynamicFov.SetVelocityBoost then
+        return false
+    end
+
+    local changed = addon.DynamicFov.SetVelocityBoost(boost)
+    local boostCleared = changed and (tonumber(boost) or 0) == 0
+
+    if holdSource ~= nil then
+        -- A hold owns FOV; the new boost is remembered and applied when it ends.
+        -- If the boost cleared, drop any borrowed manual base now: the hold's owner
+        -- (a preset) restores FOV from its own snapshot when it releases, so the
+        -- borrow is moot and must not linger (it would trip the self-check).
+        if boostCleared and addon.DynamicFov.ReleaseManualBase then
+            addon.DynamicFov.ReleaseManualBase()
+        end
+        LogDebug("FovArbiter.SetVelocityBoost: stored under hold '%s'", holdSource)
+        return false
+    end
+
+    -- No hold: render the recomposed FOV now. lastDynamicZoom may be nil in
+    -- velocity-only mode (zoom-based FOV off) -- Apply ignores zoom in that case.
+    local wrote = addon.DynamicFov.Apply(lastDynamicZoom) and true or false
+
+    -- The boost just cleared. In velocity-only mode (zoom-based FOV off) the module
+    -- is no longer engaged, so the Apply above wrote nothing -- the borrowed manual
+    -- base must be written back explicitly here so FOV returns to the player's own
+    -- value instead of staying at the last boosted one. RestoreManualBase writes +
+    -- clears; it is a no-op when nothing is borrowed (e.g. zoom-based FOV is on,
+    -- where Apply already rendered the interpolated base), so this is safe either way.
+    if boostCleared and addon.DynamicFov.RestoreManualBase then
+        if addon.DynamicFov.RestoreManualBase() then
+            wrote = true
+        end
+    end
+
+    return wrote
+end
+
+-- ---------------------------------------------------------------------------
 -- Emergency recovery
 -- ---------------------------------------------------------------------------
 

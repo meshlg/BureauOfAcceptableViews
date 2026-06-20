@@ -1,6 +1,54 @@
+# === Editors / IDE ===
 .vscode/
+.idea/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# === Internal dev docs & notes (not for the public addon) ===
 _ARCHITECTURE.md
 _DEVELOPMENT.md
 MEMORY.md
 pvpalerts-camera-conflict.md
 DESCRIPTION.bbcode.txt
+
+# === OS junk ===
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Linux
+.directory
+.Trash-*
+
+# === Backups / temp / swap ===
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*~
+*.swp
+*.swo
+
+# === Logs ===
+*.log
+
+# === Archives (don't commit packaged builds) ===
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# === ESO-specific ===
+# Per-character saved variables / live game data should never be in the addon repo
+SavedVariables/

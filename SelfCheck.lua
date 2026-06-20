@@ -311,6 +311,100 @@ local function CheckInteractionEntryLeak()
     return nil
 end
 
+-- ShoulderControl's sprint poll runs only in Auto mode with sprint as a trigger. A
+-- timer left registered otherwise is wasted per-frame work.
+local function CheckShoulderPollLeak()
+    local shoulder = addon.ShoulderControl
+    if not (shoulder and shoulder.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = shoulder.GetDiagnostics()
+    if diag.sprintPolling and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_SHOULDER_POLL_LEAK)
+    end
+    return nil
+end
+
+-- While shoulder-swap is Off it must own nothing and hold no captured base. A base
+-- still captured (or claimed ownership) while disabled means a swing was not cleanly
+-- handed back.
+local function CheckShoulderOwnershipLeak()
+    local shoulder = addon.ShoulderControl
+    if not (shoulder and shoulder.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = shoulder.GetDiagnostics()
+    if not diag.enabled and (diag.owns or diag.hasBase) then
+        return GetString(SI_BAV_SELFCHECK_SHOULDER_OWNERSHIP_LEAK)
+    end
+    return nil
+end
+
+-- The options-window flag must clear on close and on disable. Still flagged open
+-- while disabled means the flag leaked (the module would wrongly suspend if re-enabled).
+local function CheckShoulderOptionsLeak()
+    local shoulder = addon.ShoulderControl
+    if not (shoulder and shoulder.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = shoulder.GetDiagnostics()
+    if diag.optionsOpen and not diag.enabled then
+        return GetString(SI_BAV_SELFCHECK_SHOULDER_OPTIONS_LEAK)
+    end
+    return nil
+end
+
+-- VelocityFov's speed-sample timer must run only while the feature is enabled OR
+-- the debug overlay is showing (which keeps the sampler alive to populate its
+-- readout). A timer left registered while BOTH are off is the standing per-frame
+-- cost the addon promises to avoid.
+local function CheckVelocityPollLeak()
+    local velocity = addon.VelocityFov
+    if not (velocity and velocity.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = velocity.GetDiagnostics()
+    if diag.sampling and not diag.enabled and not diag.debug then
+        return GetString(SI_BAV_SELFCHECK_VELOCITY_POLL_LEAK)
+    end
+    return nil
+end
+
+-- A velocity boost must settle to 0 when the feature is disabled. A non-zero boost
+-- (or a still-running ramp) while disabled means FOV was not cleanly handed back.
+local function CheckVelocityBoostLeak()
+    local velocity = addon.VelocityFov
+    if not (velocity and velocity.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = velocity.GetDiagnostics()
+    if not diag.enabled and (diag.currentBoost ~= 0 or diag.ramping) then
+        return GetString(SI_BAV_SELFCHECK_VELOCITY_BOOST_LEAK)
+    end
+    return nil
+end
+
+-- DynamicFov borrows the player's manual FOV as a base only while a velocity boost
+-- is active with zoom-based FOV off. A borrowed base left captured while the module
+-- is not engaged at all means the borrow never got released.
+local function CheckDynamicManualBaseLeak()
+    local dynamic = addon.DynamicFov
+    if not (dynamic and dynamic.GetDiagnostics) then
+        return nil
+    end
+
+    local diag = dynamic.GetDiagnostics()
+    if diag.manualBaseCaptured and not diag.engaged then
+        return GetString(SI_BAV_SELFCHECK_DYNAMIC_MANUAL_BASE_LEAK)
+    end
+    return nil
+end
+
 -- Ordered list of invariant checks. Add an entry and it is automatically part of
 -- every run and report.
 local INVARIANT_CHECKS = {
@@ -323,6 +417,12 @@ local INVARIANT_CHECKS = {
     CheckCoalesceLeak,
     CheckOptionsOpenLeak,
     CheckInteractionEntryLeak,
+    CheckShoulderPollLeak,
+    CheckShoulderOwnershipLeak,
+    CheckShoulderOptionsLeak,
+    CheckVelocityPollLeak,
+    CheckVelocityBoostLeak,
+    CheckDynamicManualBaseLeak,
 }
 
 -- Run every invariant check, returning a list of localized problem strings (empty

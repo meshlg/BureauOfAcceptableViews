@@ -57,6 +57,17 @@ local function LogInfo(...)
     if private.LogInfo then private.LogInfo(...) end
 end
 
+-- True when the ShoulderControl module currently owns the shoulder property (its
+-- mode is auto or manual). While it does, ContextPresets cedes shoulder entirely:
+-- it neither snapshots nor writes it, so exactly one module touches shoulder at a
+-- time. Resolved lazily so file load order between the two modules cannot matter,
+-- and so a missing module simply means "not owned" (presets manage shoulder as
+-- before). See ShoulderControl.lua for the ownership contract.
+local function ShoulderOwnedExternally()
+    local shoulder = addon.ShoulderControl
+    return shoulder ~= nil and shoulder.OwnsShoulder and shoulder.OwnsShoulder()
+end
+
 -- ---------------------------------------------------------------------------
 -- Preset shape
 -- ---------------------------------------------------------------------------
@@ -90,8 +101,12 @@ local DISTANCE_KEY = "distance"
 -- result is always a faithful, replayable subset of the live camera state.
 function ContextPresets.Snapshot()
     local preset = {}
+    -- When ShoulderControl owns shoulder, skip it here so the captured base never
+    -- carries shoulder -- hence a later restore never rewrites it, leaving that
+    -- property entirely to ShoulderControl.
+    local skipShoulder = ShoulderOwnedExternally()
     for _, key in ipairs(PRESET_KEYS) do
-        if CameraSettings.IsSupported(key) then
+        if not (skipShoulder and key == "shoulder") and CameraSettings.IsSupported(key) then
             local value, ok = CameraSettings.Get(key)
             if ok then
                 preset[key] = value
@@ -484,7 +499,8 @@ local function ResolveBundle(stateId, snapshot)
         preset.thirdPersonFov = snapshot.thirdPersonFov
             + (bundle.fovTarget - snapshot.thirdPersonFov) * k
     end
-    if bundle.shoulderTarget ~= nil and snapshot.shoulder ~= nil then
+    if bundle.shoulderTarget ~= nil and snapshot.shoulder ~= nil
+        and not ShoulderOwnedExternally() then
         preset.shoulder = snapshot.shoulder
             + (bundle.shoulderTarget - snapshot.shoulder) * k
     end

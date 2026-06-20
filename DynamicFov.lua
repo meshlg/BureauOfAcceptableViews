@@ -67,7 +67,19 @@ local config = {
     nearFov = nil,   -- resolved to the FOV range min on first Configure()
     farFov  = nil,   -- resolved to the FOV range max on first Configure()
     smooth  = false, -- when true, FOV glides to its target instead of snapping
+    -- Velocity-reactive FOV boost (degrees) added on top of the base FOV. Owned by
+    -- the VelocityFov module and pushed in via SetVelocityBoost (through FovArbiter).
+    -- 0 means no boost. This module composes base + boost so a single writer
+    -- (DynamicFov, gated by FovArbiter) produces the final FOV either way.
+    velocityBoost = 0,
 }
+
+-- When zoom-based FOV is OFF but a velocity boost is active, there is no zoom
+-- interpolation to form a base FOV from -- the base is the player's own manual
+-- FOV. We capture it lazily the first time a boost becomes non-zero, so the boost
+-- adds on top of whatever the player set, and restore it when the boost clears.
+-- nil whenever we are not borrowing the manual FOV as a base.
+local manualBaseFov = nil
 
 -- The last FOV we wrote, so we can skip redundant CameraSettings.Set calls when
 -- the interpolated value has not meaningfully changed since the last apply.
@@ -224,9 +236,44 @@ local function StartAnimation(targetFov)
     return true
 end
 
--- Returns true if the feature is both supported on this client and switched on.
+-- Returns true if zoom-based dynamic FOV is switched on (and supported). This is
+-- the user-facing "Dynamic FOV" semantics used by the settings getters/UI; it does
+-- NOT account for a velocity boost (see IsEngaged for the write-path guard).
 function DynamicFov.IsEnabled()
     return config.enabled and CameraSettings.IsSupported(FOV_KEY)
+end
+
+-- Returns true if this module should be driving FOV at all: either zoom-based FOV
+-- is on, OR a velocity boost is active. Used as the Apply() guard so velocity FOV
+-- works even when the zoom-based feature is off. When neither is active, Apply is a
+-- no-op and the player's manual FOV is left exactly as the game set it.
+function DynamicFov.IsEngaged()
+    return (config.enabled or config.velocityBoost ~= 0) and CameraSettings.IsSupported(FOV_KEY)
+end
+
+-- Compute the BASE FOV (before any velocity boost) for a zoom distance.
+--   * Zoom-based FOV on  -> interpolate between near/far across the zoom range.
+--   * Zoom-based FOV off -> the borrowed manual base FOV, if we captured one.
+-- Returns nil when no base can be formed (ranges unavailable, or off with nothing
+-- captured), so callers can skip the write.
+local function ComputeBaseFov(zoom)
+    if config.enabled then
+        local nearFov, farFov = config.nearFov, config.farFov
+        if nearFov == nil or farFov == nil then
+            return nil
+        end
+
+        local zoomMin, zoomMax = GetZoomRange()
+        if zoomMin == nil or zoomMax == nil then
+            return nil
+        end
+
+        return InterpolateFov(zoom, zoomMin, zoomMax, nearFov, farFov)
+    end
+
+    -- Zoom-based FOV is off: the base is the player's manual FOV we borrowed when
+    -- the boost first engaged. nil when we have not borrowed one.
+    return manualBaseFov
 end
 
 -- Apply runtime configuration, typically mirrored from SavedVariables by
@@ -253,6 +300,13 @@ function DynamicFov.Configure(options)
         config.farFov  = tonumber(options.farFov)  or config.farFov
     end
 
+    -- When zoom-based FOV is ON the base comes from interpolation, so any borrowed
+    -- manual base (used only in velocity-only mode) is irrelevant -- drop it. The
+    -- borrow's whole lifecycle otherwise lives in SetVelocityBoost / ReleaseManualBase.
+    if config.enabled then
+        manualBaseFov = nil
+    end
+
     lastAppliedFov = nil
     -- Any reconfiguration (including being turned off) cancels an in-flight
     -- glide so we never animate toward a now-stale target.
@@ -262,34 +316,108 @@ function DynamicFov.Configure(options)
         tostring(config.nearFov), tostring(config.farFov))
 end
 
+-- Set the velocity-reactive FOV boost (degrees) added on top of the base FOV. This
+-- is the entry point VelocityFov uses, always routed through FovArbiter so the
+-- boost is suppressed while a preset holds FOV. This function ONLY updates state;
+-- FovArbiter re-renders via Apply() afterward (when no hold is active) and calls
+-- ReleaseManualBase() once the boost has cleared.
+--
+-- Manual-base borrow (velocity FOV with zoom-based FOV off): on the first non-zero
+-- boost we capture the player's current FOV as the base, so the boost adds on top of
+-- their own FOV. The borrow is restored to the camera by FovArbiter's follow-up
+-- Apply (base + 0) and then dropped via ReleaseManualBase, so it never lingers.
+-- Returns true if the boost value actually changed.
+function DynamicFov.SetVelocityBoost(boost)
+    boost = tonumber(boost) or 0
+    if boost == config.velocityBoost then
+        return false
+    end
+
+    -- Borrow the live FOV as a base the first time a boost engages while zoom-based
+    -- FOV is off (nothing else forms a base in that mode).
+    if config.velocityBoost == 0 and boost ~= 0
+        and not config.enabled and manualBaseFov == nil
+        and CameraSettings.IsSupported(FOV_KEY) then
+        local current, ok = CameraSettings.Get(FOV_KEY)
+        if ok and current ~= nil then
+            manualBaseFov = current
+        end
+    end
+
+    config.velocityBoost = boost
+    lastAppliedFov = nil  -- force the next Apply to write the recomposed FOV
+    LogDebug("DynamicFov.SetVelocityBoost: boost=%.2f (zoomFov=%s)",
+        boost, tostring(config.enabled))
+    return true
+end
+
+-- Drop a borrowed manual base FOV WITHOUT writing it back. Called by FovArbiter
+-- when the boost clears while a preset hold owns FOV: the preset restores FOV from
+-- its own snapshot, so writing here would fight it -- we only forget the borrow so
+-- it does not linger and trip the self-check. No-op when nothing is borrowed.
+function DynamicFov.ReleaseManualBase()
+    manualBaseFov = nil
+end
+
+-- Restore a borrowed manual base FOV to the camera, then drop it. Called by
+-- FovArbiter when the boost clears with no hold active AND zoom-based FOV is off:
+-- in that mode IsEngaged() has just become false, so Apply() no longer writes, and
+-- the borrowed base must be written back here so the camera returns to the player's
+-- own FOV instead of staying at the last boosted value. Returns true if it wrote.
+-- No-op (and no write) when nothing is borrowed -- e.g. zoom-based FOV is on, where
+-- Apply already rendered the interpolated base.
+function DynamicFov.RestoreManualBase()
+    if manualBaseFov == nil then
+        return false
+    end
+    local wrote = WriteFov(manualBaseFov)
+    manualBaseFov = nil
+    return wrote
+end
+
+-- Read-only snapshot of FOV-driver state, for SelfCheck invariants and dumps.
+-- Returns a fresh flat table so callers cannot mutate runtime state.
+--   zoomEnabled        zoom-based dynamic FOV is on
+--   engaged            this module is driving FOV (zoom on OR a boost is active)
+--   velocityBoost      current boost in degrees (0 = none)
+--   manualBaseCaptured a manual base FOV is borrowed (velocity-only mode)
+--   animating          the smoothing glide updater is currently registered
+function DynamicFov.GetDiagnostics()
+    return {
+        zoomEnabled        = config.enabled,
+        engaged            = DynamicFov.IsEngaged(),
+        velocityBoost      = config.velocityBoost,
+        manualBaseCaptured = manualBaseFov ~= nil,
+        animating          = animActive,
+    }
+end
+
 -- Recompute and apply the FOV for the given zoom distance. Called whenever the
--- zoom actually changes (never per-frame). No-op when the feature is disabled,
--- unavailable, not yet configured, or when the new FOV is within FOV_EPSILON of
--- the last value we wrote. Returns true only on a verified write.
+-- zoom actually changes (never per-frame), and whenever the velocity boost changes
+-- (routed through FovArbiter). The final FOV is base + velocityBoost, where the
+-- base comes from zoom interpolation (zoom-based FOV on) or the borrowed manual FOV
+-- (zoom-based FOV off, boost only). No-op when neither is engaged, unavailable, not
+-- yet configured, or when the new FOV is within FOV_EPSILON of the last value we
+-- wrote. Returns true only on a verified write.
 function DynamicFov.Apply(zoom)
-    if not DynamicFov.IsEnabled() then
+    if not DynamicFov.IsEngaged() then
         return false
     end
 
     zoom = tonumber(zoom)
-    if zoom == nil then
+
+    -- Zoom-based FOV needs a valid zoom to interpolate; the velocity-only path
+    -- (zoom-based off) ignores zoom and bases off the captured manual FOV.
+    if config.enabled and zoom == nil then
         return false
     end
 
-    local nearFov, farFov = config.nearFov, config.farFov
-    if nearFov == nil or farFov == nil then
+    local baseFov = ComputeBaseFov(zoom)
+    if baseFov == nil then
         return false
     end
 
-    local zoomMin, zoomMax = GetZoomRange()
-    if zoomMin == nil or zoomMax == nil then
-        return false
-    end
-
-    local targetFov = InterpolateFov(zoom, zoomMin, zoomMax, nearFov, farFov)
-    if targetFov == nil then
-        return false
-    end
+    local targetFov = baseFov + config.velocityBoost
 
     if lastAppliedFov ~= nil and mathabs(targetFov - lastAppliedFov) <= FOV_EPSILON then
         return false
@@ -303,10 +431,12 @@ function DynamicFov.Apply(zoom)
     end
 
     if not WriteFov(targetFov) then
-        LogWarn("DynamicFov.Apply: failed to set FOV=%.2f for zoom=%.2f", targetFov, zoom)
+        LogWarn("DynamicFov.Apply: failed to set FOV=%.2f (base=%.2f, boost=%.2f)",
+            targetFov, baseFov, config.velocityBoost)
         return false
     end
 
-    LogDebug("DynamicFov.Apply: zoom=%.2f -> FOV=%.2f", zoom, targetFov)
+    LogDebug("DynamicFov.Apply: base=%.2f, boost=%.2f -> FOV=%.2f",
+        baseFov, config.velocityBoost, targetFov)
     return true
 end

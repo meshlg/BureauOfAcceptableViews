@@ -107,6 +107,14 @@ end
 ---@field presetStateIntensities table<string, number>
 ---@field presetStateCoalesce table<string, number>
 ---@field presetRestoreSnapshot table|nil
+---@field shoulderMode string
+---@field shoulderOffset number
+---@field shoulderAutoSide string
+---@field shoulderManualSide string
+---@field shoulderAutoStates table<string, boolean>
+---@field shoulderBaseSnapshot number|nil
+---@field velocityFovEnabled boolean
+---@field velocityFovSensitivity number
 
 ---@type BAVSavedVars
 local DEFAULT_SAVED_VARS = {
@@ -184,6 +192,36 @@ local DEFAULT_SAVED_VARS = {
     -- backs its FPV hook off. On by default; purely a chat-noise toggle -- the
     -- backoff itself always runs as a safety net regardless of this setting.
     conflictAdvisoryEnabled = true,
+    -- Over-the-shoulder (shoulder swap). OFF by default -- a disabled module
+    -- registers no events and writes nothing. Mode is one of "off"/"auto"/"manual";
+    -- the two active modes are mutually exclusive (auto = by-state, manual = slash).
+    -- offset is the OTS magnitude (0..1 onto the shoulder range). autoStates picks
+    -- which states trigger the auto swing; all off until the user opts in.
+    shoulderMode = "off",
+    shoulderOffset = 0.00,
+    shoulderAutoSide = "right",
+    shoulderManualSide = "right",
+    shoulderAutoStates = {
+        combat = false,
+        stealth = false,
+        mounted = false,
+        swimming = false,
+        sprint = false,
+    },
+    -- Runtime recovery (NOT a user setting): the player's own shoulder captured the
+    -- moment a swing first overrode it, persisted so a reloadui/logout/crash while
+    -- swung hands the real shoulder back next session. nil whenever not swung.
+    shoulderBaseSnapshot = nil,
+    -- Velocity-reactive FOV. ON by default for a cinematic sense of speed out of
+    -- the box; it still does nothing until the player actually moves fast, and a
+    -- single toggle turns it off. sensitivity (0..1) scales how strongly the
+    -- player's real movement speed widens the FOV (speed is derived from world
+    -- position deltas, so it covers sprint/mount/swim/speed-buffs uniformly).
+    velocityFovEnabled = true,
+    velocityFovSensitivity = 0.75,
+    -- On-screen debug overlay for velocity FOV (live speed/boost/position). OFF by
+    -- default; never prints to chat. Useful for calibrating the speed thresholds.
+    velocityFovDebug = false,
 }
 
 ---@type BAVSavedVars|nil (accessible via private.savedVars after initialization)
@@ -588,6 +626,136 @@ function Settings.SetPresetRestoreSnapshot(snapshot)
     vars.presetRestoreSnapshot = snapshot
 end
 
+-- ---------------------------------------------------------------------------
+-- Over-the-shoulder (shoulder swap) getters/setters
+-- ---------------------------------------------------------------------------
+
+local SHOULDER_MODES = { off = true, auto = true, manual = true }
+local SHOULDER_SIDES = { left = true, right = true, center = true }
+local SHOULDER_STATE_IDS = { "combat", "stealth", "mounted", "swimming", "sprint" }
+
+-- Coerce a stored shoulder mode to a known id, defaulting to "off".
+local function NormalizeShoulderMode(value)
+    if type(value) == "string" and SHOULDER_MODES[value] then
+        return value
+    end
+    return "off"
+end
+
+function Settings.GetShoulderMode()
+    local vars = GetSavedVarsOrDefaults()
+    return NormalizeShoulderMode(vars.shoulderMode)
+end
+
+function Settings.GetShoulderOffset()
+    local vars = GetSavedVarsOrDefaults()
+    return private.ClampNumber(tonumber(vars.shoulderOffset) or 0.00, 0, 1)
+end
+
+function Settings.GetShoulderAutoSide()
+    local vars = GetSavedVarsOrDefaults()
+    local side = vars.shoulderAutoSide
+    return (side == "left" or side == "right") and side or "right"
+end
+
+function Settings.GetShoulderManualSide()
+    local vars = GetSavedVarsOrDefaults()
+    local side = vars.shoulderManualSide
+    return (type(side) == "string" and SHOULDER_SIDES[side]) and side or "right"
+end
+
+-- Persist the current manual side (called by ShoulderControl on a /bav shoulder
+-- toggle so the side survives a reload). Does NOT re-push config: the module
+-- already applied the side itself.
+function Settings.SetShoulderManualSide(side)
+    local vars = Settings.GetSavedVars()
+    if not vars then
+        return
+    end
+    if type(side) == "string" and SHOULDER_SIDES[side] then
+        vars.shoulderManualSide = side
+    end
+end
+
+-- Full auto-trigger map with every state present (defaults false), so
+-- ShoulderControl.Configure receives a complete table.
+function Settings.GetShoulderAutoStates()
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.shoulderAutoStates) == "table" and vars.shoulderAutoStates or {}
+    local result = {}
+    for _, id in ipairs(SHOULDER_STATE_IDS) do
+        result[id] = saved[id] and true or false
+    end
+    return result
+end
+
+function Settings.GetShoulderAutoState(stateId)
+    local vars = GetSavedVarsOrDefaults()
+    local saved = type(vars.shoulderAutoStates) == "table" and vars.shoulderAutoStates or nil
+    return (saved ~= nil and saved[stateId]) and true or false
+end
+
+function Settings.SetShoulderAutoState(stateId, value)
+    local vars = Settings.GetSavedVars()
+    if not vars then
+        return
+    end
+    if type(vars.shoulderAutoStates) ~= "table" then
+        vars.shoulderAutoStates = {}
+    end
+    -- Guard against stale UI references writing junk keys.
+    local known = false
+    for _, id in ipairs(SHOULDER_STATE_IDS) do
+        if id == stateId then known = true break end
+    end
+    if not known then
+        return
+    end
+    vars.shoulderAutoStates[stateId] = value and true or false
+    Settings.ApplyOptionalFeatureConfig()
+end
+
+-- Recovery snapshot persistence for ShoulderControl (parallels the preset restore
+-- snapshot pair). The base is a single number; storing nil clears it.
+function Settings.GetShoulderBaseSnapshot()
+    local vars = GetSavedVarsOrDefaults()
+    return tonumber(vars.shoulderBaseSnapshot)
+end
+
+function Settings.SetShoulderBaseSnapshot(value)
+    local vars = Settings.GetSavedVars()
+    if not vars then
+        return
+    end
+    if value == nil then
+        vars.shoulderBaseSnapshot = nil
+        return
+    end
+    local num = tonumber(value)
+    if num ~= nil then
+        vars.shoulderBaseSnapshot = num
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Velocity-reactive FOV getters
+-- ---------------------------------------------------------------------------
+
+function Settings.IsVelocityFovEnabled()
+    local vars = GetSavedVarsOrDefaults()
+    return NormalizeBoolean(vars.velocityFovEnabled, true)
+end
+
+function Settings.GetVelocityFovSensitivity()
+    local vars = GetSavedVarsOrDefaults()
+    return private.ClampNumber(tonumber(vars.velocityFovSensitivity) or 0.75, 0, 1)
+end
+
+function Settings.IsVelocityFovDebug()
+    local vars = GetSavedVarsOrDefaults()
+    return NormalizeBoolean(vars.velocityFovDebug, false)
+end
+
 function Settings.NormalizeSavedSettings()
     local savedVars = private.savedVars
     if not savedVars then
@@ -647,6 +815,27 @@ function Settings.ApplyOptionalFeatureConfig()
             stateCoalesce = Settings.GetPresetStateCoalesces(),
         })
     end
+
+    -- ShoulderControl is configured BEFORE VelocityFov has no ordering requirement,
+    -- but note ShoulderControl ownership affects ContextPresets (above) via a lazy
+    -- query at apply/snapshot time, so order here is not significant.
+    if addon.ShoulderControl and addon.ShoulderControl.Configure then
+        addon.ShoulderControl.Configure({
+            mode       = Settings.GetShoulderMode(),
+            offset     = Settings.GetShoulderOffset(),
+            autoSide   = Settings.GetShoulderAutoSide(),
+            manualSide = Settings.GetShoulderManualSide(),
+            autoStates = Settings.GetShoulderAutoStates(),
+        })
+    end
+
+    if addon.VelocityFov and addon.VelocityFov.Configure then
+        addon.VelocityFov.Configure({
+            enabled     = Settings.IsVelocityFovEnabled(),
+            sensitivity = Settings.GetVelocityFovSensitivity(),
+            debug       = Settings.IsVelocityFovDebug(),
+        })
+    end
 end
 
 function Settings.ApplyConfigurationChanges()
@@ -700,6 +889,17 @@ function Settings.ResetConfigurationToDefaults(suppressOutput)
     -- The advisory is a neutral safety-net notice, so a reset restores it to the
     -- shipped "on" default rather than switching it off with the camera features.
     savedVars.conflictAdvisoryEnabled = true
+    -- Reset turns the Tier-2 optional features OFF too (the neutral, vanilla camera
+    -- the user expects from a reset). Pushing the off-state through
+    -- ApplyConfigurationChanges restores any swung shoulder / active boost and stops
+    -- their timers. Sensitivity/offset/side are left at their stored values -- they
+    -- are inert while the feature is off and irrelevant until re-enabled.
+    savedVars.shoulderMode = "off"
+    savedVars.shoulderAutoStates = {
+        combat = false, stealth = false, mounted = false, swimming = false, sprint = false,
+    }
+    savedVars.shoulderBaseSnapshot = nil
+    savedVars.velocityFovEnabled = false
     Settings.ApplyConfigurationChanges()
 
     if not suppressOutput then
@@ -811,6 +1011,21 @@ function Settings.RegisterSettingsPanel()
 
     local function DynamicFovDisabled()
         return not Settings.IsDynamicFovEnabled()
+    end
+
+    -- Shoulder-swap control gating: the offset slider is greyed when the mode is
+    -- Off; the auto-side dropdown and auto-trigger checkboxes are greyed unless the
+    -- mode is Auto (they are meaningless in Off and Manual).
+    local function ShoulderDisabled()
+        return Settings.GetShoulderMode() == "off"
+    end
+
+    local function ShoulderAutoDisabled()
+        return Settings.GetShoulderMode() ~= "auto"
+    end
+
+    local function VelocityFovDisabled()
+        return not Settings.IsVelocityFovEnabled()
     end
 
     -- Build the per-state preset dropdowns from PRESET_STATE_DEFINITIONS so the
@@ -1208,6 +1423,211 @@ end
             width = "full",
             default = true,
             reference = "BAVSettingsPresetSmooth",
+        },
+            },
+        },
+        {
+            type = "submenu",
+            name = GetString(SI_BAV_HEADER_SHOULDER),
+            tooltip = GetString(SI_BAV_SECTION_SHOULDER_DESCRIPTION),
+            controls = {
+        {
+            type = "description",
+            text = GetString(SI_BAV_SECTION_SHOULDER_DESCRIPTION),
+            width = "full",
+        },
+        {
+            type = "dropdown",
+            name = GetString(SI_BAV_SETTING_SHOULDER_MODE_NAME),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_MODE_TOOLTIP),
+            choices = {
+                GetString(SI_BAV_SETTING_SHOULDER_MODE_OFF),
+                GetString(SI_BAV_SETTING_SHOULDER_MODE_AUTO),
+                GetString(SI_BAV_SETTING_SHOULDER_MODE_MANUAL),
+            },
+            choicesValues = { "off", "auto", "manual" },
+            getFunc = function() return Settings.GetShoulderMode() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.shoulderMode = value end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = "off",
+            reference = "BAVSettingsShoulderMode",
+        },
+        {
+            type = "slider",
+            name = GetString(SI_BAV_SETTING_SHOULDER_OFFSET_NAME),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_OFFSET_TOOLTIP),
+            min = 0,
+            max = 100,
+            step = 5,
+            getFunc = function() return zo_round(Settings.GetShoulderOffset() * 100) end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.shoulderOffset = private.ClampNumber(value / 100, 0, 1) end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = 0,
+            disabled = ShoulderDisabled,
+            reference = "BAVSettingsShoulderOffset",
+        },
+        {
+            type = "dropdown",
+            name = GetString(SI_BAV_SETTING_SHOULDER_SIDE_NAME),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_SIDE_TOOLTIP),
+            choices = {
+                GetString(SI_BAV_SETTING_SHOULDER_SIDE_LEFT),
+                GetString(SI_BAV_SETTING_SHOULDER_SIDE_RIGHT),
+            },
+            choicesValues = { "left", "right" },
+            getFunc = function() return Settings.GetShoulderAutoSide() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.shoulderAutoSide = value end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = "right",
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderSide",
+        },
+        {
+            type = "description",
+            text = GetString(SI_BAV_SETTING_SHOULDER_AUTO_STATES_LABEL),
+            width = "full",
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderAutoStatesLabel",
+        },
+        {
+            type = "description",
+            text = GetString(SI_BAV_SETTING_SHOULDER_AUTO_HELP),
+            width = "full",
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderAutoHelp",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_COMBAT_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_COMBAT_TOOLTIP),
+            getFunc = function() return Settings.GetShoulderAutoState("combat") end,
+            setFunc = function(value) Settings.SetShoulderAutoState("combat", value) end,
+            width = "half",
+            default = false,
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderStateCombat",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_STEALTH_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_STEALTH_TOOLTIP),
+            getFunc = function() return Settings.GetShoulderAutoState("stealth") end,
+            setFunc = function(value) Settings.SetShoulderAutoState("stealth", value) end,
+            width = "half",
+            default = false,
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderStateStealth",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_MOUNTED_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_MOUNTED_TOOLTIP),
+            getFunc = function() return Settings.GetShoulderAutoState("mounted") end,
+            setFunc = function(value) Settings.SetShoulderAutoState("mounted", value) end,
+            width = "half",
+            default = false,
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderStateMounted",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_SWIMMING_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_SWIMMING_TOOLTIP),
+            getFunc = function() return Settings.GetShoulderAutoState("swimming") end,
+            setFunc = function(value) Settings.SetShoulderAutoState("swimming", value) end,
+            width = "half",
+            default = false,
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderStateSwimming",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME),
+            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP),
+            getFunc = function() return Settings.GetShoulderAutoState("sprint") end,
+            setFunc = function(value) Settings.SetShoulderAutoState("sprint", value) end,
+            width = "half",
+            default = false,
+            disabled = ShoulderAutoDisabled,
+            reference = "BAVSettingsShoulderStateSprint",
+        },
+            },
+        },
+        {
+            type = "submenu",
+            name = GetString(SI_BAV_HEADER_VELOCITY_FOV),
+            tooltip = GetString(SI_BAV_SECTION_VELOCITY_FOV_DESCRIPTION),
+            controls = {
+        {
+            type = "description",
+            text = GetString(SI_BAV_SECTION_VELOCITY_FOV_HOW),
+            width = "full",
+        },
+        {
+            type = "description",
+            text = GetString(SI_BAV_SECTION_VELOCITY_FOV_DESCRIPTION),
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_VELOCITY_FOV_ENABLED_NAME),
+            tooltip = GetString(SI_BAV_SETTING_VELOCITY_FOV_ENABLED_TOOLTIP),
+            getFunc = function() return Settings.IsVelocityFovEnabled() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.velocityFovEnabled = value and true or false end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = true,
+            reference = "BAVSettingsVelocityFovEnabled",
+        },
+        {
+            type = "slider",
+            name = GetString(SI_BAV_SETTING_VELOCITY_FOV_SENSITIVITY_NAME),
+            tooltip = GetString(SI_BAV_SETTING_VELOCITY_FOV_SENSITIVITY_TOOLTIP),
+            min = 0,
+            max = 100,
+            step = 5,
+            getFunc = function() return zo_round(Settings.GetVelocityFovSensitivity() * 100) end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.velocityFovSensitivity = private.ClampNumber(value / 100, 0, 1) end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = 75,
+            disabled = VelocityFovDisabled,
+            reference = "BAVSettingsVelocityFovSensitivity",
+        },
+        {
+            -- On-screen diagnostic readout (speed/boost/position). Never prints to
+            -- chat. Independent of the feature toggle: it can be turned on to
+            -- calibrate even while the boost itself is off.
+            type = "checkbox",
+            name = GetString(SI_BAV_SETTING_VELOCITY_FOV_DEBUG_NAME),
+            tooltip = GetString(SI_BAV_SETTING_VELOCITY_FOV_DEBUG_TOOLTIP),
+            getFunc = function() return Settings.IsVelocityFovDebug() end,
+            setFunc = function(value)
+                local vars = Settings.GetSavedVars()
+                if vars then vars.velocityFovDebug = value and true or false end
+                Settings.ApplyOptionalFeatureConfig()
+            end,
+            width = "full",
+            default = false,
+            reference = "BAVSettingsVelocityFovDebug",
         },
             },
         },

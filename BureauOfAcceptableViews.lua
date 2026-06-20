@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.7.20061354",
+    version = "1.7.20062010",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -778,6 +778,15 @@ local function OnPlayerActivated(event)
         presets.RecoverPersistedSnapshot()
     end
 
+    -- Same recovery for the shoulder swap: if the previous session ended while the
+    -- camera was swung over a shoulder, the engine still holds the swung value and
+    -- Settings has the player's real base. Recover it once per session, before the
+    -- module is allowed to capture anything as its new base.
+    local shoulder = BureauOfAcceptableViews.ShoulderControl
+    if shoulder and shoulder.RecoverPersistedSnapshot then
+        shoulder.RecoverPersistedSnapshot()
+    end
+
     local targetZoom = GetRestoredCurrentZoom()
     if targetZoom then
         LogInfo(SI_BAV_LOG_APPLYING_SAVED_STATE,
@@ -799,6 +808,14 @@ local function OnPlayerActivated(event)
     -- are off or idle at the default state, so default behaviour is unchanged.
     if presets and presets.ReassertActive then
         presets.ReassertActive()
+    end
+
+    -- The engine also reset the shoulder offset across the load screen, and the
+    -- shoulder swap's trigger flags survive a zone change without re-firing their
+    -- events, so re-assert the active swing here too. No-op when shoulder swap is
+    -- off or already centered.
+    if shoulder and shoulder.ReassertActive then
+        shoulder.ReassertActive()
     end
 
     -- Passive reliability pass at a naturally-quiet moment (post-load screen,
@@ -981,9 +998,21 @@ end
 
 local function ResetCameraState(suppressOutput)
     -- First hand the camera back from any optional feature that might be holding
-    -- it: a stuck FOV hold or an un-restored context-preset snapshot. This is a
-    -- no-op when those features are off or idle, so the zoom reset below behaves
-    -- exactly as before for users who never enabled presets.
+    -- it: a stuck velocity FOV boost, a swung shoulder, a stuck FOV hold, or an
+    -- un-restored context-preset snapshot. Order matters: clear the velocity boost
+    -- and shoulder swing first, then the preset hold/snapshot, so the zoom reset
+    -- below lands on a neutral, un-boosted, un-held, un-swung camera. Each is a
+    -- no-op when its feature is off or idle.
+    local VelocityFov = BureauOfAcceptableViews.VelocityFov
+    if VelocityFov and VelocityFov.EmergencyRestore then
+        VelocityFov.EmergencyRestore()
+    end
+
+    local ShoulderControl = BureauOfAcceptableViews.ShoulderControl
+    if ShoulderControl and ShoulderControl.EmergencyRestore then
+        ShoulderControl.EmergencyRestore()
+    end
+
     local ContextPresets = BureauOfAcceptableViews.ContextPresets
     if ContextPresets and ContextPresets.EmergencyRestore then
         ContextPresets.EmergencyRestore()
@@ -1104,6 +1133,7 @@ local SLASH_HELP_STRING_IDS = {
     SI_BAV_MSG_HELP_CONFIG_RESET,
     SI_BAV_MSG_HELP_SIMULATE,
     SI_BAV_MSG_HELP_RESET,
+    SI_BAV_MSG_HELP_SHOULDER,
     SI_BAV_MSG_HELP_SCENARIOS,
     SI_BAV_MSG_HELP_SELFCHECK,
 }
@@ -1137,6 +1167,38 @@ local SLASH_COMMAND_HANDLERS = {
     end,
     reset = function(args)
         ResetCameraState()
+    end,
+    shoulder = function(args)
+        -- Manual-mode over-the-shoulder control. The two active shoulder modes are
+        -- mutually exclusive: this command is only meaningful in Manual mode, so in
+        -- Off/Auto we print a notice instead of silently doing nothing.
+        local settings = GetSettingsModule()
+        if settings.GetShoulderMode() ~= "manual" then
+            ChatInfo(SI_BAV_MSG_SHOULDER_NOT_MANUAL)
+            return
+        end
+
+        local shoulder = BureauOfAcceptableViews.ShoulderControl
+        if not (shoulder and shoulder.SetManualSide) then
+            return
+        end
+
+        -- args[2] (already lower-cased) may be left/right/center; absent toggles.
+        local requested = args[2]
+        if requested ~= "left" and requested ~= "right" and requested ~= "center" then
+            requested = nil  -- toggle
+        end
+
+        local ok, side = shoulder.SetManualSide(requested or "toggle")
+        if ok then
+            local SIDE_STRING_IDS = {
+                left   = SI_BAV_SETTING_SHOULDER_SIDE_LEFT,
+                right  = SI_BAV_SETTING_SHOULDER_SIDE_RIGHT,
+                center = SI_BAV_SETTING_SHOULDER_SIDE_CENTER,
+            }
+            local sideId = SIDE_STRING_IDS[side]
+            ChatInfo(SI_BAV_MSG_SHOULDER_SET, sideId and GetString(sideId) or side)
+        end
     end,
     selfcheck = function(args)
         if BureauOfAcceptableViews.SelfCheck then

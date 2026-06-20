@@ -1,9 +1,9 @@
-## Title: Bureau of Acceptable Views |c6FCB9Fv1.7.20061354|r
-## Version: 1.7.20061354
-## AddOnVersion: 1700
+## Title: Bureau of Acceptable Views |c6FCB9Fv1.7.20062010|r
+## Version: 1.7.20062010
+## AddOnVersion: 1701
 ## Author: |c6FCB9Fmeshlg|r
 ## APIVersion: 101050
-## Description: Allows the player to zoom freely between max zoom and first person view in restricted states, with configurable persistence, localization, and a settings panel. Controller input falls back to the game's default camera handling.
+## Description: Free camera zoom between max zoom and first person in restricted states, with optional dynamic FOV, speed-reactive FOV, context presets, and over-the-shoulder swap. Configurable persistence, localization (EN/RU), and a settings panel. Controller input falls back to the game's default camera handling.
 ## SavedVariables: BureauOfAcceptableViews_SavedVariables
 ## OptionalDependsOn: LibAddonMenu-2.0>=43 LibSprint
 
@@ -18,8 +18,10 @@ BureauOfAcceptableViews.lua
 CameraSettings.lua
 DynamicFov.lua
 FovArbiter.lua
+VelocityFov.lua
 SelfCheck.lua
 ContextPresets.lua
+ShoulderControl.lua
 Settings.lua
 ; ---------------------------------------------------------------------------
 
