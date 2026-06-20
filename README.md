@@ -138,6 +138,14 @@ nothing on clients where the FOV property is unsupported.
 - The notice can be turned off in **Settings → Diagnostics** (the safety step
   itself always runs; the toggle only controls the chat message). `/bav
   selfcheck` always reports the current backoff status.
+- A related case: some game states (notably ZOS's reworked **werewolf**) take
+  over the camera distance and **reject** BAV's writes. If another addon is
+  measuring the camera by toggling first person in the same frame, a rejected
+  restore used to leave the view stuck in first person — re-forced on every
+  manual zoom-out. BAV now **honors the engine's rejection**: when a same-frame
+  undo write does not take, it passes the partner toggle straight to the game so
+  the game balances its own pair, and the view is never forced. A sustained run
+  of rejected camera-distance writes is surfaced by `/bav selfcheck`.
 
 ---
 

@@ -405,6 +405,27 @@ local function CheckDynamicManualBaseLeak()
     return nil
 end
 
+-- A run of consecutive verified zoom-write rejections means the engine is
+-- refusing our camera-distance writes -- the signature of another system owning
+-- the camera distance (e.g. ZOS's reworked werewolf), which previously left the
+-- camera stuck in first person while a measurement-toggling addon re-forced it.
+-- The same-frame undo path now degrades safely, but a sustained run is still
+-- worth surfacing so the cause is visible instead of mysterious.
+local ZOOM_WRITE_FAILURE_WARN = 3
+
+local function CheckZoomWriteFailures()
+    if not private.GetConflictDiagnostics then
+        return nil
+    end
+
+    local conflict = private.GetConflictDiagnostics()
+    local failures = conflict.consecutiveZoomWriteFailures or 0
+    if failures >= ZOOM_WRITE_FAILURE_WARN then
+        return zo_strformat(GetString(SI_BAV_SELFCHECK_ZOOM_WRITE_FAILURES), failures)
+    end
+    return nil
+end
+
 -- Ordered list of invariant checks. Add an entry and it is automatically part of
 -- every run and report.
 local INVARIANT_CHECKS = {
@@ -423,6 +444,7 @@ local INVARIANT_CHECKS = {
     CheckVelocityPollLeak,
     CheckVelocityBoostLeak,
     CheckDynamicManualBaseLeak,
+    CheckZoomWriteFailures,
 }
 
 -- Run every invariant check, returning a list of localized problem strings (empty

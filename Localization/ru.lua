@@ -146,6 +146,7 @@ local strings = {
     [SI_BAV_LOG_TOGGLE_PAIR_PASS] = "ToggleFPV: Парный тогл в том же кадре — передаём игре",
     [SI_BAV_LOG_TOGGLE_PAIR_UNDO] = "ToggleFPV: Парный тогл в том же кадре — откатываем своё изменение, чтобы пара осталась сбалансированной",
     [SI_BAV_LOG_OSCILLATION_BACKOFF] = "ToggleFPV: Обнаружена неуправляемая осцилляция вида — хук FPV переведён в пассивный режим до /bav reset или перезахода",
+    [SI_BAV_LOG_TOGGLE_PAIR_UNDO_FAILED] = "ToggleFPV: Движок отклонил откат в том же кадре — передаём парный тогл игре, чтобы она сбалансировала свою пару",
     [SI_BAV_LOG_TOGGLE_SIEGE_PASS] = "ToggleFPV: Управление осадным орудием — передаём игре",
     [SI_BAV_LOG_TOGGLE_STATE] = "ToggleFPV: zoom=%.2f, isLimited=%s, lastZoom=%.2f",
     [SI_BAV_LOG_TOGGLE_TO_THIRD] = "ToggleFPV: FPV -> Third Person (цель=%.2f)",
@@ -282,6 +283,7 @@ local strings = {
     [SI_BAV_SELFCHECK_ALL_OK] = "Все инварианты в норме.",
     [SI_BAV_SELFCHECK_BACKOFF_ACTIVE] = "Хук FPV переведён в пассивный режим после обнаружения быстрой осцилляции вида (%d переключений в окне). Используйте /bav reset или перезайдите, чтобы вернуть обычную обработку.",
     [SI_BAV_SELFCHECK_BACKOFF_INACTIVE] = "Хук FPV активен (осцилляция вида не обнаружена).",
+    [SI_BAV_SELFCHECK_ZOOM_WRITE_FAILURES] = "Игра отклонила %d записей дистанции камеры подряд. Возможно, камерой управляет другая система (например, в облике трансформации). BAV отступил, чтобы вид не навязывался принудительно; если кадрирование выглядит неправильно — /bav reset или перезайдите.",
 
     [SI_BAV_SCENARIO_TOGGLE_FPV] = "toggle-fpv",
     [SI_BAV_SCENARIO_ZOOM_IN] = "zoom-in",

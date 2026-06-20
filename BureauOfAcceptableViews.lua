@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.7.20062010",
+    version = "1.7.20062044",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -218,6 +218,18 @@ local viewFlipTimestamps = {}    -- sliding window of observed real-flip times (
 local lastObservedFpv    = nil   -- last observed FPV-ness, to detect a real flip
 local togglePassive      = false -- backoff: when true, our FPV hook is a no-op
 local oscillationWarned  = false -- session throttle for the advisory message
+
+-- Camera-write health.
+-- ---------------------------------------------------------------------------
+-- Count of consecutive VERIFIED-write rejections from the engine (SetCameraZoom
+-- returning false because CameraSettings.Set could not read the value back). A
+-- single failure is noise, but a RUN of them means the engine is refusing our
+-- distance writes -- e.g. ZOS's reworked werewolf manages its own camera distance
+-- and rejects ours, which previously left the camera stuck in first person while
+-- another addon's measurement toggles kept re-forcing it. Reset to 0 on the first
+-- good write; surfaced via GetConflictDiagnostics so /bav selfcheck can warn
+-- instead of the symptom showing up only as a mystery bug report.
+local consecutiveZoomWriteFailures = 0
 
 -- Helper function to check if zoom value is valid
 local function IsValidZoom(zoom)
@@ -433,9 +445,17 @@ local function SetCameraZoom(zoom)
     -- the epsilon argument so there is a single source of truth for it.
     local applied = BureauOfAcceptableViews.CameraSettings.Set("distance", zoom)
     if not applied then
+        -- The engine rejected (or could not verify) this distance write. Track a
+        -- run of these: a single miss is noise, but a sustained run means the
+        -- engine is refusing our writes (e.g. reworked werewolf owns its camera
+        -- distance), which the self-check surfaces.
+        consecutiveZoomWriteFailures = consecutiveZoomWriteFailures + 1
         LogWarn(SI_BAV_LOG_SET_APPLY_FAILED, zoom)
         return false
     end
+
+    -- A verified write went through; the engine is honoring our distance again.
+    consecutiveZoomWriteFailures = 0
 
     -- Keep zoom-dependent FOV in sync. This is the single verified zoom-write
     -- point, so it is the natural place to re-evaluate dynamic FOV. Route through
@@ -536,18 +556,32 @@ local function PreHookToggleGameCameraFirstPerson()
     --     the second too -- the engine's own pair balances.
     --   * If we HANDLED the first (limited state / FPV: we changed zoom and blocked
     --     the engine), the engine never moved, so the partner toggle would now
-    --     desync the view. Undo our zoom change, block the engine again, and the
-    --     frame ends exactly where it started.
+    --     desync the view. Undo our zoom change and block the engine again so the
+    --     frame ends exactly where it started -- UNLESS the engine rejects the undo
+    --     write (some states own the camera distance), in which case we pass the
+    --     partner toggle through and let the engine balance its own pair.
     local frameMs = GetFrameTimeMilliseconds()
     if lastToggleFrameMs == frameMs then
         if lastToggleBlocked and lastTogglePrevZoom ~= nil then
             LogDebug(SI_BAV_LOG_TOGGLE_PAIR_UNDO)
-            SetCameraZoom(lastTogglePrevZoom)
+            -- Restore the pre-change zoom so the measurement pair nets to zero.
+            -- Crucially, honor the write result: if the engine REJECTS the undo
+            -- (e.g. reworked werewolf owns its camera distance and refuses our
+            -- third-person restore), blocking the engine here would leave the
+            -- camera stuck where our first toggle put it (FPV) -- exactly the
+            -- "stuck in first person, forced back on manual zoom-out" bug. When
+            -- the undo cannot be verified, fall through and PASS the partner
+            -- toggle to the engine so its own pair balances instead.
+            local undone = SetCameraZoom(lastTogglePrevZoom)
             -- Consume the undo so a (pathological) third same-frame toggle is
             -- treated as a fresh first toggle rather than undoing again.
             lastToggleBlocked = false
             lastTogglePrevZoom = nil
-            return true  -- keep the engine out; our undo restored the start state
+            if undone then
+                return true  -- our undo restored the start state; keep engine out
+            end
+            LogWarn(SI_BAV_LOG_TOGGLE_PAIR_UNDO_FAILED)
+            return false  -- undo rejected: let the engine balance its own pair
         end
         LogDebug(SI_BAV_LOG_TOGGLE_PAIR_PASS)
         return false  -- first toggle was passed through; let the engine balance
@@ -1024,6 +1058,9 @@ local function ResetCameraState(suppressOutput)
     oscillationWarned = false
     viewFlipTimestamps = {}
     lastObservedFpv = nil
+    -- Clear the camera-write failure run too: reset is a clean slate, and the very
+    -- next SetCameraZoom below re-establishes the true state.
+    consecutiveZoomWriteFailures = 0
 
     local resetZoom = GetConfiguredMinMountedZoom()
     lastZoom = resetZoom
@@ -1077,6 +1114,7 @@ function private.GetConflictDiagnostics()
         togglePassive   = togglePassive,
         flipsInWindow   = #viewFlipTimestamps,
         oscillationWarned = oscillationWarned,
+        consecutiveZoomWriteFailures = consecutiveZoomWriteFailures,
     }
 end
 

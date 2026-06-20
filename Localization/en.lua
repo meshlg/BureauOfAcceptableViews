@@ -146,6 +146,7 @@ local strings = {
     SI_BAV_LOG_TOGGLE_PAIR_PASS = "ToggleFPV: Same-frame partner toggle - passing to game",
     SI_BAV_LOG_TOGGLE_PAIR_UNDO = "ToggleFPV: Same-frame partner toggle - undoing our change to keep the pair balanced",
     SI_BAV_LOG_OSCILLATION_BACKOFF = "ToggleFPV: Runaway view oscillation detected - FPV hook backed off (passive) until /bav reset or relog",
+    SI_BAV_LOG_TOGGLE_PAIR_UNDO_FAILED = "ToggleFPV: Same-frame undo write rejected by engine - passing partner toggle to game so it balances its own pair",
     SI_BAV_LOG_TOGGLE_SIEGE_PASS = "ToggleFPV: Siege controlled - passing to game",
     SI_BAV_LOG_TOGGLE_STATE = "ToggleFPV: zoom=%.2f, isLimited=%s, lastZoom=%.2f",
     SI_BAV_LOG_TOGGLE_TO_THIRD = "ToggleFPV: FPV -> Third Person (target=%.2f)",
@@ -283,6 +284,7 @@ local strings = {
     SI_BAV_SELFCHECK_ALL_OK = "All invariants OK.",
     SI_BAV_SELFCHECK_BACKOFF_ACTIVE = "FPV hook is backed off after detecting rapid view oscillation (%d flips in window). Use /bav reset or relog to resume normal handling.",
     SI_BAV_SELFCHECK_BACKOFF_INACTIVE = "FPV hook active (no view oscillation detected).",
+    SI_BAV_SELFCHECK_ZOOM_WRITE_FAILURES = "The game has rejected %d camera-distance writes in a row. Another system may be controlling the camera (e.g. while transformed). BAV has stepped aside so the view is not forced; if framing looks off, /bav reset or relog.",
 
     SI_BAV_SCENARIO_TOGGLE_FPV = "toggle-fpv",
     SI_BAV_SCENARIO_ZOOM_IN = "zoom-in",
