@@ -1134,7 +1134,7 @@ end
         type = "panel",
         name = GetString(SI_BAV_PANEL_NAME),
         displayName = GetString(SI_BAV_PANEL_DISPLAY_NAME),
-        author = "meshlg",
+        author = "|c6FCB9Fmeshlg|r",
         version = addon.version,
         registerForRefresh = true,
         registerForDefaults = false,

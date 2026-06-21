@@ -22,11 +22,11 @@ with optional persistence so your framing survives zone changes and relogs.
 
 On top of that, several **optional** systems can shape the camera further:
 
-- **Dynamic FOV** *(on by default)* — field of view follows your zoom distance.
-- **Velocity FOV** *(on by default)* — field of view widens with your movement
+- **Dynamic FOV** *(on by default)* - field of view follows your zoom distance.
+- **Velocity FOV** *(on by default)* - field of view widens with your movement
   speed.
-- **Context presets** *(off by default)* — cinematic framing per gameplay state.
-- **Over-the-shoulder swap** *(off by default)* — swing the camera to one side.
+- **Context presets** *(off by default)* - cinematic framing per gameplay state.
+- **Over-the-shoulder swap** *(off by default)* - swing the camera to one side.
 
 Every optional system is fully inert until it is on, and the two FOV effects do
 nothing on clients where the FOV property is unsupported.
@@ -39,25 +39,25 @@ nothing on clients where the FOV property is unsupported.
 - Zoom anywhere between max zoom and first person while the game would normally
   lock the camera.
 - Configurable persistence: keep your zoom across zone changes and logins, or
-  let it reset — your choice.
+  let it reset - your choice.
 - Controller input safely falls back to the game's default camera handling, so
   nothing breaks if you play on a gamepad.
 
 ### Dynamic FOV *(optional, on by default)*
 - Ties your third-person field of view to the current zoom distance: tighter
   when zoomed in, wider when zoomed out, smoothly interpolated in between.
-- Only recalculates when the zoom distance actually changes — there is no
-  per-frame work — so the framing stays consistent without ever touching a hot
+- Only recalculates when the zoom distance actually changes - there is no
+  per-frame work - so the framing stays consistent without ever touching a hot
   path.
 - When disabled, your manual FOV is left exactly as the game set it.
 
 ### Velocity FOV *(optional, on by default)*
 - Widens the field of view the faster you actually move, then eases back as you
-  slow — a cinematic sense of speed.
+  slow - a cinematic sense of speed.
 - Driven by your **real movement speed**, derived from how far you travel between
   samples (every 150 ms, never per frame). Because it reads speed rather than a
-  state, it responds to *any* source — sprint, mount, swimming, and speed buffs
-  like Major Expedition or the Steed mundus — with nothing per-state to configure
+  state, it responds to *any* source - sprint, mount, swimming, and speed buffs
+  like Major Expedition or the Steed mundus - with nothing per-state to configure
   and no dependency on LibSprint.
 - A **sensitivity** slider scales how strongly speed widens the lens.
 - Composes cleanly with the rest: the boost is *added on top of* dynamic FOV, and
@@ -67,33 +67,33 @@ nothing on clients where the FOV property is unsupported.
   teleport re-baselines instead of spiking, lag snaps are rejected, and only
   horizontal movement counts (jumps and falls do not inflate it).
 - An optional **on-screen debug overlay** (off by default, never printed to chat)
-  shows your live speed, boost, and position — handy for tuning the sensitivity.
+  shows your live speed, boost, and position - handy for tuning the sensitivity.
 - When disabled, your manual FOV is left exactly as the game set it.
 
 ### Over-the-shoulder swap *(optional, off by default)*
 - Swings the third-person camera over one shoulder for a focused, cinematic
   frame, and returns it to centre when it should.
 - One **mode** selector chooses how it triggers:
-  - **Auto** — swings automatically while you are in any state you pick (combat,
+  - **Auto** - swings automatically while you are in any state you pick (combat,
     stealth, mounted, swimming, sprint) and recentres when you leave them.
-  - **Manual** — swings on demand via the `/bav shoulder` command
+  - **Manual** - swings on demand via the `/bav shoulder` command
     (`left`/`right`/`center`, or no argument to toggle); the automatic behaviour
     is off in this mode.
 - A **shoulder offset** slider sets how far the camera swings.
 - While shoulder swap is on it takes over the shoulder from the stealth context
-  preset, so the two never fight over the same setting — exactly one owns it.
+  preset, so the two never fight over the same setting - exactly one owns it.
 - Your pre-swing shoulder is snapshotted and **persisted**, so a `/reloadui`,
   logout, or crash mid-swing hands your real framing back next session.
 
 ### Context presets *(optional, off by default)*
-- Applies a fixed cinematic camera bundle for the state you are in — combat,
-  werewolf, stealth, interaction (dialogue), mounted, swimming, or sprinting —
+- Applies a fixed cinematic camera bundle for the state you are in - combat,
+  werewolf, stealth, interaction (dialogue), mounted, swimming, or sprinting -
   and restores your own framing when you leave it.
 - Entering a state is instant, but leaving one is briefly damped: a rapid
   out-and-back (combat ending and restarting a moment later) keeps the cinematic
   framing instead of snapping the camera around, so the view never jitters.
 - The interaction state is the exception: entering it is briefly delayed, so
-  flicking through a merchant or quick quest turn-in never pecks the camera —
+  flicking through a merchant or quick quest turn-in never pecks the camera -
   only a conversation you actually stay in reframes the shot.
 - Exactly one state is active at a time, resolved by priority
   (werewolf → combat → stealth → interaction → mounted → swimming → sprint), so
@@ -107,7 +107,7 @@ nothing on clients where the FOV property is unsupported.
   offsets into your settings.
 - Open the game's settings while a preset is active and your camera quietly
   reverts to your real values for editing, then the preset re-applies on top of
-  your changes when you close it — so tweaking FOV or distance never fights the
+  your changes when you close it - so tweaking FOV or distance never fights the
   active preset or gets baked into your saved framing.
 - An **emergency restore** button in the settings panel instantly returns the
   camera to your control if anything ever feels stuck.
@@ -129,11 +129,11 @@ nothing on clients where the FOV property is unsupported.
   between first and third person. BAV watches for that: if the view flips back
   and forth at a rate no human could produce, it **steps its own handling
   aside** (passes the toggle straight to the game) to break the loop.
-- The backoff is fully **reversible** and touches none of your saved settings —
+- The backoff is fully **reversible** and touches none of your saved settings -
   it clears the moment you relog or use `/bav reset`.
 - When it triggers, a single **neutral** chat notice explains what happened and
   suggests disabling addons one at a time to find the source. It never names or
-  blames another addon — a hooked function cannot reliably know who called it,
+  blames another addon - a hooked function cannot reliably know who called it,
   so guessing would be misleading.
 - The notice can be turned off in **Settings → Diagnostics** (the safety step
   itself always runs; the toggle only controls the chat message). `/bav
@@ -141,7 +141,7 @@ nothing on clients where the FOV property is unsupported.
 - A related case: some game states (notably ZOS's reworked **werewolf**) take
   over the camera distance and **reject** BAV's writes. If another addon is
   measuring the camera by toggling first person in the same frame, a rejected
-  restore used to leave the view stuck in first person — re-forced on every
+  restore used to leave the view stuck in first person - re-forced on every
   manual zoom-out. BAV now **honors the engine's rejection**: when a same-frame
   undo write does not take, it passes the partner toggle straight to the game so
   the game balances its own pair, and the view is never forced. A sustained run
@@ -152,7 +152,7 @@ nothing on clients where the FOV property is unsupported.
 ## Why it's built well
 
 - **No surprises.** Context presets and over-the-shoulder swap stay off until you
-  enable them, and any disabled module is fully inert — it registers no events,
+  enable them, and any disabled module is fully inert - it registers no events,
   runs no polling, and never writes to the camera. The two FOV effects ship on,
   but a single toggle each returns the camera to exactly what the game set.
 - **One source of truth for engine I/O.** All camera reads and writes go
@@ -161,13 +161,13 @@ nothing on clients where the FOV property is unsupported.
   change needs fixing in exactly one place.
 - **No FOV tug-of-war.** A dedicated `FovArbiter` makes field-of-view
   precedence explicit, so dynamic FOV, the velocity boost, and context presets
-  can never overwrite each other depending on load order or timing — the boost
+  can never overwrite each other depending on load order or timing - the boost
   adds onto the dynamic base, and a preset hold cleanly overrides both.
 - **One owner per contested setting.** Just as `FovArbiter` owns the FOV, shoulder
   swap takes sole ownership of the shoulder offset while it is on, so it and the
   stealth preset never write the same value out of turn.
 - **Nothing on the per-frame path.** Work happens only in response to real
-  events — a zoom change, a state transition — or a coarse 150 ms sample for the
+  events - a zoom change, a state transition - or a coarse 150 ms sample for the
   things ESO exposes no event for (sprint state, movement speed); never every
   frame. The transient FOV/shoulder glides tear their own updater down the moment
   they land.
@@ -176,12 +176,12 @@ nothing on clients where the FOV property is unsupported.
   offsets or a one-sided camera baked into your settings.
 - **Catches its own regressions.** A pull-based self-check validates internal
   invariants and watches the footprint of its own tables at quiet moments,
-  turning silent bugs into a single readable warning — without adding any
+  turning silent bugs into a single readable warning - without adding any
   per-frame cost.
 - **Plays nicely with others.** BAV shares the game's first-person toggle with
   any addon that uses it. It balances the rapid same-frame toggle pairs other
   addons use to measure the camera, and if it ever detects a runaway view
-  flicker it steps its own handling aside — a reversible safety net that needs
+  flicker it steps its own handling aside - a reversible safety net that needs
   no configuration and never blames another addon.
 - **Localized** with English and Russian strings, and a clean LibAddonMenu
   settings panel.
@@ -191,18 +191,18 @@ nothing on clients where the FOV property is unsupported.
 ## Architecture at a glance
 
 The addon is split into layers with **one-way dependencies**: upper layers know
-about lower ones, never the reverse. Two rules anchor the whole design — *only*
+about lower ones, never the reverse. Two rules anchor the whole design - *only*
 `CameraSettings` talks to the engine, and *only* `FovArbiter` decides who owns
 the field of view. Everything else is a consumer of those two contracts.
 
 ```
-            Settings.lua            UI + SavedVariables — wires everything
+            Settings.lua            UI + SavedVariables - wires everything
                  │ Configure(...)
    ┌──────────┬──────────┬──────────┬───────────┬──────────────┐
    ▼          ▼          ▼          ▼           ▼              ▼
 DynamicFov VelocityFov ContextPresets ShoulderControl   Free-zoom core
    │          │          │  ▲         │ (owns shoulder)  (BureauOf…Views.lua)
-   │          │          │  ╎ GetDiagnostics() — read-only   ┌──────────────┐
+   │          │          │  ╎ GetDiagnostics() - read-only   ┌──────────────┐
    │          │          │  └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┤  SelfCheck   │
    └────┬─────┘          │                                   └──────────────┘
         ▼                │                          passive observer · writes nothing
@@ -245,9 +245,9 @@ BAV-owned tables, so it depends on no one and its absence changes nothing.
 ## How it works
 
 A few small maps of the moving parts. None of this is required reading to *use*
-the addon — it is here for the curious and for anyone reading the source.
+the addon - it is here for the curious and for anyone reading the source.
 
-### State priority — only one preset wins
+### State priority - only one preset wins
 
 Context presets never fight each other. At most **one** state is active at a
 time, resolved top-down by priority and gated by each state's style choice:
@@ -267,9 +267,9 @@ Off wins.
                                  └───────────────────┘
 ```
 
-Werewolf deliberately outranks combat — a transformation should win even mid-fight.
+Werewolf deliberately outranks combat - a transformation should win even mid-fight.
 
-### Dynamic + velocity FOV — zoom and speed drive the lens
+### Dynamic + velocity FOV - zoom and speed drive the lens
 
 Two effects feed the field of view, and both flow through `FovArbiter` so they
 compose instead of fighting. Dynamic FOV sets a **base** from the zoom distance;
@@ -290,7 +290,7 @@ Velocity FOV reads movement speed from how far you travel between 150 ms samples
 spikes, and counts only horizontal travel. When dynamic FOV is off, the boost
 rides on top of your manual FOV instead of a zoom-derived base.
 
-### Over-the-shoulder — one owner for the shoulder
+### Over-the-shoulder - one owner for the shoulder
 
 When shoulder swap is on it owns the shoulder offset outright. In **auto** mode it
 swings while any chosen state is active and recentres when you leave them all; in
@@ -308,11 +308,11 @@ shoulder so the two never write it out of turn.
         └─ ContextPresets.OwnsShoulder()? → stealth preset skips shoulder
 ```
 
-### Snapshot & restore — surviving a crash
+### Snapshot & restore - surviving a crash
 
 The first time a preset takes over, your real camera is snapshotted **and
 persisted** to SavedVariables. So even a `/reloadui`, logout, or crash mid-preset
-hands your genuine framing back next session — never the preset's offsets.
+hands your genuine framing back next session - never the preset's offsets.
 
 ```
   preset takes over          session ends abruptly         next login
@@ -328,7 +328,7 @@ hands your genuine framing back next session — never the preset's offsets.
 This breaks the drift cycle where a dirty (offset) camera would otherwise be
 saved as the new baseline.
 
-### Self-check — quiet until something's wrong
+### Self-check - quiet until something's wrong
 
 A pull-based reliability pass: it runs at load and zone change (or on demand via
 `/bav selfcheck`), validates internal invariants, samples the footprint of
