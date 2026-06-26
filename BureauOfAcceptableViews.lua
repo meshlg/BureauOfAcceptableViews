@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "1.8.22060150",
+    version = "1.9.26062110",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -24,7 +24,6 @@ local GetSetting    = GetSetting
 local SetSetting    = SetSetting
 local GetString     = GetString
 local d             = d
-local pcall         = pcall
 local tonumber      = tonumber
 local select        = select
 local type          = type
@@ -34,7 +33,6 @@ local stringlower   = string.lower
 local tableinsert   = table.insert
 local mathmax       = math.max
 local mathmin       = math.min
-local GetFrameTimeMilliseconds = GetFrameTimeMilliseconds
 
 -- Localization/chat helpers
 local CHAT_PREFIX = "|c6FCB9F[Bureau Of Acceptable Views]|r: "
@@ -185,24 +183,24 @@ local SAVE_DELAY_MS = 1000
 local SAVE_TIMER_NAME = ADDON_NAME .. "_QueuedSave"
 
 
--- Re-entrancy + programmatic-pair protection for the FPV toggle.
+-- Re-entrancy protection for the FPV toggle.
 -- ---------------------------------------------------------------------------
--- isTogglingFPV guards true re-entrancy (our own SetCameraZoom re-entering the
--- hook synchronously). The frame-pair fields below handle a DIFFERENT case: an
--- addon (e.g. PvpAlerts) that calls ToggleGameCameraFirstPerson() twice in the
--- SAME rendered frame to measure the camera, expecting the pair to net to no
--- visible change. A human can physically toggle at most once per frame, so a
--- second toggle within one frame is always programmatic; we use that invariant
--- (not any addon-specific check) to keep such pairs balanced for ANY caller.
+-- isTogglingFPV guards true re-entrancy: the camera write that an owned toggle
+-- triggers now happens in ZoomReconciler's deferred callback, which sets this
+-- flag around its SetCameraZoom so that if the write somehow re-triggered the
+-- FPV toggle, this hook sees the guard and passes through instead of recursing.
+-- The programmatic same-frame PAIR case (an addon such as PvpAlerts calling
+-- ToggleGameCameraFirstPerson() twice in one frame to measure the camera) is no
+-- longer handled by frame-timing bookkeeping here: ownership and camera
+-- convergence live in ZoomReconciler, whose intent model makes a probe pair net
+-- to zero regardless of frame timing. See ZoomReconciler.lua.
 local isTogglingFPV = false          -- Flag to prevent re-entrant calls
-local lastToggleFrameMs = nil        -- frame time of the toggle we last processed
-local lastToggleBlocked = false      -- did we handle (block the engine on) it?
-local lastTogglePrevZoom = nil       -- zoom before our change, for same-frame undo
 
 -- Runaway-oscillation detector + reversible backoff.
 -- ---------------------------------------------------------------------------
--- A safety net for FUTURE, unknown addon conflicts (the PvpAlerts case is
--- already fixed by the same-frame pairing above). If something drives the view
+-- A safety net for FUTURE, unknown addon conflicts (the PvpAlerts probe-pair
+-- case is handled structurally by ZoomReconciler's intent model). If something
+-- drives the view
 -- to flip first-person<->third-person at a rate no human could produce, we stop
 -- OUR hook from participating: it goes passive (pass every call straight to the
 -- engine = vanilla behavior), breaking our side of the loop. This is purely a
@@ -546,50 +544,10 @@ local function PreHookToggleGameCameraFirstPerson()
         return false
     end
 
-    -- Same-frame programmatic pair handling.
-    -- ---------------------------------------------------------------------------
-    -- A second toggle within the SAME rendered frame can only be programmatic (a
-    -- human toggles at most once per frame). An addon like PvpAlerts toggles FPV
-    -- and immediately back in one frame to measure the camera, expecting the pair
-    -- to net to zero. We must not leave the camera desynced after such a pair:
-    --   * If we PASSED the first toggle to the engine (normal third person), pass
-    --     the second too -- the engine's own pair balances.
-    --   * If we HANDLED the first (limited state / FPV: we changed zoom and blocked
-    --     the engine), the engine never moved, so the partner toggle would now
-    --     desync the view. Undo our zoom change and block the engine again so the
-    --     frame ends exactly where it started -- UNLESS the engine rejects the undo
-    --     write (some states own the camera distance), in which case we pass the
-    --     partner toggle through and let the engine balance its own pair.
-    local frameMs = GetFrameTimeMilliseconds()
-    if lastToggleFrameMs == frameMs then
-        if lastToggleBlocked and lastTogglePrevZoom ~= nil then
-            LogDebug(SI_BAV_LOG_TOGGLE_PAIR_UNDO)
-            -- Restore the pre-change zoom so the measurement pair nets to zero.
-            -- Crucially, honor the write result: if the engine REJECTS the undo
-            -- (e.g. reworked werewolf owns its camera distance and refuses our
-            -- third-person restore), blocking the engine here would leave the
-            -- camera stuck where our first toggle put it (FPV) -- exactly the
-            -- "stuck in first person, forced back on manual zoom-out" bug. When
-            -- the undo cannot be verified, fall through and PASS the partner
-            -- toggle to the engine so its own pair balances instead.
-            local undone = SetCameraZoom(lastTogglePrevZoom)
-            -- Consume the undo so a (pathological) third same-frame toggle is
-            -- treated as a fresh first toggle rather than undoing again.
-            lastToggleBlocked = false
-            lastTogglePrevZoom = nil
-            if undone then
-                return true  -- our undo restored the start state; keep engine out
-            end
-            LogWarn(SI_BAV_LOG_TOGGLE_PAIR_UNDO_FAILED)
-            return false  -- undo rejected: let the engine balance its own pair
-        end
-        LogDebug(SI_BAV_LOG_TOGGLE_PAIR_PASS)
-        return false  -- first toggle was passed through; let the engine balance
-    end
-
-    -- Genuine (non-paired) toggle for this frame: fold it into the runaway
-    -- detector. This may trip backoff; if so, go passive immediately and pass
-    -- this call straight through to the engine.
+    -- Genuine toggle for this frame: fold it into the runaway detector. This may
+    -- trip backoff; if so, go passive immediately and pass this call straight
+    -- through to the engine. Balanced probe pairs net to no real view flip, so
+    -- they do not register here.
     NoteViewStateAndCheckOscillation(GetGameTimeMilliseconds())
     if togglePassive then
         return false
@@ -600,78 +558,20 @@ local function PreHookToggleGameCameraFirstPerson()
         LogInfo(SI_BAV_LOG_TOGGLE_SIEGE_PASS)
         return false  -- Allow original function to execute
     end
-    
-    -- Set re-entrancy flag and remember the zoom BEFORE we touch anything, so a
-    -- same-frame partner toggle can undo our change exactly.
-    isTogglingFPV = true
-    local prevZoom = GetCameraZoom()
 
-    local function HandleToggle()
-        local zoom = GetCameraZoom()
-        local isLimited = IsZoomLimited()
-        local handled = false
-
-        LogDebug(SI_BAV_LOG_TOGGLE_STATE,
-            zoom, GetLocalizedBoolean(isLimited), lastZoom)
-
-        if isLimited or zoom <= ZOOM_FPV then
-            local setSucceeded = false
-
-            if zoom <= ZOOM_FPV then
-                -- Switching from FPV to third person
-                local targetZoom = (IsValidZoom(lastZoom) and lastZoom > ZOOM_FPV) and lastZoom or GetConfiguredMinMountedZoom()
-                LogInfo(SI_BAV_LOG_TOGGLE_TO_THIRD, targetZoom)
-                setSucceeded = SetCameraZoom(targetZoom)
-            else
-                -- Switching to FPV
-                if zoom > GetConfiguredLastZoomThreshold() then
-                    lastZoom = zoom
-                    LogDebug(SI_BAV_LOG_SOURCE_UPDATED_LASTZOOM, sourceName, lastZoom)
-                end
-                LogInfo(SI_BAV_LOG_TOGGLE_TO_FPV, zoom)
-                setSucceeded = SetCameraZoom(ZOOM_FPV)
-            end
-
-            if setSucceeded then
-                QueueSave()
-                handled = true
-            else
-                LogWarn(SI_BAV_LOG_SOURCE_SET_FAILED, sourceName)
-            end
-        end
-
-        if handled then
-            LogDebug(SI_BAV_LOG_TOGGLE_HANDLED)
-            return true  -- Block original function - we handled it
-        end
-
-        LogDebug(SI_BAV_LOG_TOGGLE_PASSING)
-        return false  -- Zoom is not limited, allow original function to execute
+    -- Delegate the ownership decision and the camera convergence to the
+    -- ZoomReconciler. It returns true when it took ownership (limited state, or
+    -- leaving FPV) -- in which case it has flipped its intent and scheduled a
+    -- single next-frame write, and we block the engine. It returns false for the
+    -- normal third-person -> FPV case, which we pass through to the engine's
+    -- native transition. There is no synchronous camera write here anymore, so
+    -- no same-frame-pair bookkeeping and no dependency on frame timing: a probe
+    -- pair is just two intent flips that net to zero. See ZoomReconciler.lua.
+    local reconciler = BureauOfAcceptableViews.ZoomReconciler
+    if reconciler and reconciler.HandleToggle() then
+        return true  -- owned: intent flipped, reconcile scheduled
     end
-
-    local ok, result = pcall(HandleToggle)
-    isTogglingFPV = false
-
-    if not ok then
-        LogError(SI_BAV_LOG_TOGGLE_UNHANDLED_ERROR, tostring(result))
-        -- Record this frame so a same-frame partner toggle is recognized, but mark
-        -- it as not-blocked: an errored handler did not reliably change zoom, so
-        -- there is nothing to undo and we let the engine handle the partner.
-        lastToggleFrameMs = frameMs
-        lastToggleBlocked = false
-        lastTogglePrevZoom = nil
-        return false
-    end
-
-    -- Remember what this toggle did so a second toggle in the SAME frame can keep
-    -- the pair balanced: if we blocked the engine (result == true) we stash the
-    -- pre-change zoom so the partner can undo it; if we passed through, the partner
-    -- passes through too.
-    lastToggleFrameMs = frameMs
-    lastToggleBlocked = result and true or false
-    lastTogglePrevZoom = result and prevZoom or nil
-
-    return result
+    return false     -- passthrough (engine balances any probe pair itself)
 end
 
 -- Shared handler for zooming in (reducing camera distance)
@@ -801,6 +701,14 @@ end
 local function OnPlayerActivated(event)
     LogDebug(SI_BAV_LOG_ONPLAYERACTIVATED_REAPPLY)
 
+    -- Drop any reconcile that was pending when the load screen hit: the engine
+    -- reset the camera across the zone change, so a stale deferred write must not
+    -- fire after the saved-state restore below (which is authoritative here).
+    local reconciler = BureauOfAcceptableViews.ZoomReconciler
+    if reconciler and reconciler.Cancel then
+        reconciler.Cancel()
+    end
+
     -- Recover a camera that a context preset was overriding when the previous
     -- session ended (reloadui/logout/crash mid-preset). Runs once per session,
     -- before the preset controller can capture anything, and before the zoom
@@ -865,6 +773,13 @@ end
 -- Event handler for EVENT_PLAYER_DEACTIVATED (logout/zone change)
 local function OnPlayerDeactivated(event)
     LogDebug(SI_BAV_LOG_ONPLAYERDEACTIVATED_SAVING)
+    -- Drop any pending reconcile: we are leaving this world state (logout/zone
+    -- change) and the engine will reset the camera, so a deferred write queued
+    -- here would target a context that no longer exists.
+    local reconciler = BureauOfAcceptableViews.ZoomReconciler
+    if reconciler and reconciler.Cancel then
+        reconciler.Cancel()
+    end
     -- Save immediately when player logs out or changes zone
     SaveImmediately()
 end
@@ -1062,6 +977,13 @@ local function ResetCameraState(suppressOutput)
     -- next SetCameraZoom below re-establishes the true state.
     consecutiveZoomWriteFailures = 0
 
+    -- Drop any pending reconcile and its intent: the explicit SetCameraZoom below
+    -- is authoritative, so a stale deferred write must not fire after it.
+    local reconciler = BureauOfAcceptableViews.ZoomReconciler
+    if reconciler and reconciler.Cancel then
+        reconciler.Cancel()
+    end
+
     local resetZoom = GetConfiguredMinMountedZoom()
     lastZoom = resetZoom
 
@@ -1089,6 +1011,13 @@ local function SetLastZoomValue(value)
     lastZoom = value
 end
 
+-- Raise/lower the re-entrancy guard. ZoomReconciler wraps its deferred camera
+-- write with this so a write that somehow re-triggers the FPV toggle is passed
+-- through (see the isTogglingFPV check in PreHookToggleGameCameraFirstPerson).
+local function SetTogglingFPV(value)
+    isTogglingFPV = value and true or false
+end
+
 private.ChatInfo = ChatInfo
 private.ChatError = ChatError
 private.GetLocalizedBoolean = GetLocalizedBoolean
@@ -1107,15 +1036,36 @@ private.SaveCameraState = SaveCameraState
 private.ResetCameraState = ResetCameraState
 private.DumpFullState = DumpFullState
 
+-- Exposed for ZoomReconciler (resolved lazily there at toggle time, never at
+-- load): the verified camera write, the limited-state predicate, the throttled
+-- save, and the two configured-zoom getters it needs to resolve its intent.
+private.SetCameraZoom = SetCameraZoom
+private.IsZoomLimited = IsZoomLimited
+private.QueueSave = QueueSave
+private.GetConfiguredLastZoomThreshold = GetConfiguredLastZoomThreshold
+private.GetConfiguredMinMountedZoom = GetConfiguredMinMountedZoom
+private.SetTogglingFPV = SetTogglingFPV
+
 -- Read-only conflict/backoff diagnostics for SelfCheck and /bav dump. Returns a
--- fresh flat table so callers cannot mutate detector state.
+-- fresh flat table so callers cannot mutate detector state. Folds in the
+-- ZoomReconciler's intent snapshot when the module is present.
 function private.GetConflictDiagnostics()
-    return {
+    local diagnostics = {
         togglePassive   = togglePassive,
         flipsInWindow   = #viewFlipTimestamps,
         oscillationWarned = oscillationWarned,
         consecutiveZoomWriteFailures = consecutiveZoomWriteFailures,
     }
+
+    local reconciler = BureauOfAcceptableViews.ZoomReconciler
+    if reconciler and reconciler.GetDiagnostics then
+        local r = reconciler.GetDiagnostics()
+        diagnostics.reconcileDesiredZoom = r.desiredZoom
+        diagnostics.reconcilePending     = r.pending
+        diagnostics.reconcileRetries     = r.retries
+    end
+
+    return diagnostics
 end
 
 local function HandleConfigCommand(args)

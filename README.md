@@ -139,13 +139,17 @@ nothing on clients where the FOV property is unsupported.
   itself always runs; the toggle only controls the chat message). `/bav
   selfcheck` always reports the current backoff status.
 - A related case: some game states (notably ZOS's reworked **werewolf**) take
-  over the camera distance and **reject** BAV's writes. If another addon is
-  measuring the camera by toggling first person in the same frame, a rejected
-  restore used to leave the view stuck in first person - re-forced on every
-  manual zoom-out. BAV now **honors the engine's rejection**: when a same-frame
-  undo write does not take, it passes the partner toggle straight to the game so
-  the game balances its own pair, and the view is never forced. A sustained run
-  of rejected camera-distance writes is surfaced by `/bav selfcheck`.
+  over the camera distance and **reject** BAV's writes. Combined with another
+  addon measuring the camera by toggling first person twice in one frame, this
+  used to leave the view stuck in first person - re-forced on every manual
+  zoom-out. BAV no longer tries to recognize and unwind such toggle pairs by
+  timing. Instead, in the states it manages, a toggle only records **where the
+  camera should end up** and a single write on the next frame moves it there
+  (see *Convergent toggle handling* below). A measurement addon's toggle-and-back
+  pair cancels out to no net change on its own, with no dependence on frame
+  timing, and a rejected write is retried a bounded number of times rather than
+  leaving the view half-moved. A sustained run of rejected camera-distance
+  writes is surfaced by `/bav selfcheck`.
 
 ---
 
@@ -166,6 +170,14 @@ nothing on clients where the FOV property is unsupported.
 - **One owner per contested setting.** Just as `FovArbiter` owns the FOV, shoulder
   swap takes sole ownership of the shoulder offset while it is on, so it and the
   stealth preset never write the same value out of turn.
+- **Convergent toggle handling.** In the states BAV manages, a first-person
+  toggle does not write the camera on the spot. A dedicated `ZoomReconciler`
+  records *where the camera should settle* and performs a single write on the
+  next frame. This is correct by construction: another addon's toggle-and-back
+  measurement pair cancels out to the same intent it started from, so the view
+  never desyncs - and it does not matter whether those two toggles land in the
+  same frame or not. There is no frame-timing guesswork to break in edge cases
+  like the world map or a transformed state.
 - **Nothing on the per-frame path.** Work happens only in response to real
   events - a zoom change, a state transition - or a coarse 150 ms sample for the
   things ESO exposes no event for (sprint state, movement speed); never every
@@ -179,10 +191,11 @@ nothing on clients where the FOV property is unsupported.
   turning silent bugs into a single readable warning - without adding any
   per-frame cost.
 - **Plays nicely with others.** BAV shares the game's first-person toggle with
-  any addon that uses it. It balances the rapid same-frame toggle pairs other
-  addons use to measure the camera, and if it ever detects a runaway view
-  flicker it steps its own handling aside - a reversible safety net that needs
-  no configuration and never blames another addon.
+  any addon that uses it. The convergent handling above means the rapid
+  toggle-and-back pairs other addons use to measure the camera cancel out
+  cleanly, and if it ever detects a runaway view flicker it steps its own
+  handling aside - a reversible safety net that needs no configuration and never
+  blames another addon.
 - **Localized** with English and Russian strings, and a clean LibAddonMenu
   settings panel.
 
