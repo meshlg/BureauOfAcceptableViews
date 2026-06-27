@@ -7,7 +7,7 @@ and velocity-reactive FOV are on out of the box for an eased, speed-aware feel;
 everything else stays out of your way until you turn it on.
 
 > **Compatibility:** API: LIVE 101050 / PTS 101050 · Optional: LibAddonMenu-2.0 (>= 43)
-> for the settings panel, and LibSprint for bind-independent sprint detection
+> for the settings panel, and LibSprint (>= 20260522) for bind-independent sprint detection
 > (used by the context-preset and shoulder-swap sprint trigger; velocity FOV does
 > not need it).
 
