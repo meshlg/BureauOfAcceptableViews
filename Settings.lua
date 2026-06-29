@@ -1028,6 +1028,83 @@ function Settings.RegisterSettingsPanel()
         return not Settings.IsVelocityFovEnabled()
     end
 
+    -- ---------------------------------------------------------------------------
+    -- Live status helpers (panel dashboard + submenu title tags)
+    -- ---------------------------------------------------------------------------
+    -- LAM refreshes function-valued `text`/`name` on every setting change and on
+    -- panel open (registerForRefresh is set), so these read live each time. The
+    -- camera zoom is a snapshot at those moments, not a per-frame ticker -- fine
+    -- for an at-a-glance readout. On = the shipped green, off = the muted label
+    -- grey, matching the section descriptions' palette.
+    local STATUS_COLOR_ON  = "6FCB9F"
+    local STATUS_COLOR_OFF = "8C8A82"
+
+    local function Colorize(colorHex, text)
+        return string.format("|c%s%s|r", colorHex, text)
+    end
+
+    -- A plain colored on/off word for the dashboard rows.
+    local function StatusOnOff(enabled)
+        return Colorize(enabled and STATUS_COLOR_ON or STATUS_COLOR_OFF,
+            GetString(enabled and SI_BAV_STATUS_ON or SI_BAV_STATUS_OFF))
+    end
+
+    -- A bracketed colored tag for a submenu title. `word` is already localized.
+    local function StatusTag(enabled, word)
+        return Colorize(enabled and STATUS_COLOR_ON or STATUS_COLOR_OFF, "[" .. word .. "]")
+    end
+
+    local function BoolTag(enabled)
+        return StatusTag(enabled, GetString(enabled and SI_BAV_STATUS_ON or SI_BAV_STATUS_OFF))
+    end
+
+    -- Shoulder has three states (off/auto/manual); off is muted, the two active
+    -- modes share the on color. Used by both the dashboard (word) and the title
+    -- tag (bracketed) so they never disagree.
+    local function ShoulderModeWord()
+        local mode = Settings.GetShoulderMode()
+        if mode == "auto" then return GetString(SI_BAV_STATUS_SHOULDER_AUTO) end
+        if mode == "manual" then return GetString(SI_BAV_STATUS_SHOULDER_MANUAL) end
+        return GetString(SI_BAV_STATUS_OFF)
+    end
+
+    local function ShoulderStatusWord()
+        local active = Settings.GetShoulderMode() ~= "off"
+        return Colorize(active and STATUS_COLOR_ON or STATUS_COLOR_OFF, ShoulderModeWord())
+    end
+
+    local function ShoulderTag()
+        return StatusTag(Settings.GetShoulderMode() ~= "off", ShoulderModeWord())
+    end
+
+    -- Build the dashboard text: one "Label  value" row per line. The camera row
+    -- shows first person when at/under the FPV sentinel, else the third-person
+    -- distance. Reads through the same getters the panel controls use, so the
+    -- block can never disagree with the controls below it.
+    local function StatusRow(labelKey, valueText)
+        return string.format("%s  %s", GetString(labelKey), valueText)
+    end
+
+    local function BuildStatusText()
+        local zoom = (private.GetCameraZoom and private.GetCameraZoom()) or 0
+        local cameraValue
+        if zoom <= ZOOM_FPV then
+            cameraValue = Colorize(STATUS_COLOR_ON, GetString(SI_BAV_STATUS_CAM_FIRST_PERSON))
+        else
+            cameraValue = string.format("%.2f (%s)", zoom, GetString(SI_BAV_STATUS_CAM_THIRD_PERSON))
+        end
+
+        local rows = {
+            StatusRow(SI_BAV_STATUS_LABEL_CAMERA, cameraValue),
+            StatusRow(SI_BAV_STATUS_LABEL_DYNAMIC_FOV, StatusOnOff(Settings.IsDynamicFovEnabled())),
+            StatusRow(SI_BAV_STATUS_LABEL_VELOCITY_FOV, StatusOnOff(Settings.IsVelocityFovEnabled())),
+            StatusRow(SI_BAV_STATUS_LABEL_PRESETS, StatusOnOff(Settings.ArePresetsEnabled())),
+            StatusRow(SI_BAV_STATUS_LABEL_SHOULDER, ShoulderStatusWord()),
+        }
+        return table.concat(rows, "\n")
+    end
+
+
     -- Build the per-state preset dropdowns from PRESET_STATE_DEFINITIONS so the
     -- state list stays a single source of truth. Each state picks a STYLE (Off /
     -- Subtle / Cinematic / Action) rather than a plain on/off toggle. Returned as
@@ -1110,7 +1187,10 @@ function Settings.RegisterSettingsPanel()
         -- style+intensity pair so each state's controls form a clear visual
         -- group instead of cramming three half-width items together. Combat uses
         -- the coarse seconds-scale list; every other state uses the fine ms-scale
-        -- list. Greyed only when presets are off globally. Defaults to 0 ("Off").
+        -- list. Greyed both when presets are off globally and when this state's
+        -- style is Off -- a state that applies no preset has nothing to delay the
+        -- release of, so it mirrors the intensity slider's gating above. Defaults
+        -- to 0 ("Off").
         local coalesceValues = (stateId == "combat")
             and PRESET_COALESCE_VALUES_COMBAT or PRESET_COALESCE_VALUES_DEFAULT
         controls[#controls + 1] = {
@@ -1123,7 +1203,9 @@ function Settings.RegisterSettingsPanel()
             setFunc = function(value) Settings.SetPresetStateCoalesce(stateId, value) end,
             width = "full",
             default = 0,
-            disabled = PresetsDisabled,
+            disabled = function()
+                return PresetsDisabled() or Settings.GetPresetState(stateId) == PRESET_STYLE_OFF
+            end,
             reference = def.reference .. "Coalesce",
         }
     end
@@ -1155,6 +1237,15 @@ end
             type = "description",
             text = GetString(SI_BAV_SLASH_HINT),
             width = "full",
+        },
+        {
+            -- Live at-a-glance dashboard. function-valued text so LAM refreshes it
+            -- on panel open and after any setting change (registerForRefresh).
+            type = "description",
+            title = GetString(SI_BAV_STATUS_TITLE),
+            text = BuildStatusText,
+            width = "full",
+            reference = "BAVSettingsStatusBlock",
         },
         {
             type = "header",
@@ -1260,7 +1351,9 @@ end
         },
         {
             type = "submenu",
-            name = GetString(SI_BAV_HEADER_DYNAMIC_FOV),
+            name = function()
+                return GetString(SI_BAV_HEADER_DYNAMIC_FOV) .. "  " .. BoolTag(Settings.IsDynamicFovEnabled())
+            end,
             tooltip = GetString(SI_BAV_SECTION_DYNAMIC_FOV_DESCRIPTION),
             controls = {
         {
@@ -1366,7 +1459,9 @@ end
         },
         {
             type = "submenu",
-            name = GetString(SI_BAV_HEADER_CONTEXT_PRESETS),
+            name = function()
+                return GetString(SI_BAV_HEADER_CONTEXT_PRESETS) .. "  " .. BoolTag(Settings.ArePresetsEnabled())
+            end,
             tooltip = GetString(SI_BAV_SECTION_CONTEXT_PRESETS_DESCRIPTION),
             controls = {
         {
@@ -1428,7 +1523,9 @@ end
         },
         {
             type = "submenu",
-            name = GetString(SI_BAV_HEADER_SHOULDER),
+            name = function()
+                return GetString(SI_BAV_HEADER_SHOULDER) .. "  " .. ShoulderTag()
+            end,
             tooltip = GetString(SI_BAV_SECTION_SHOULDER_DESCRIPTION),
             controls = {
         {
@@ -1511,7 +1608,7 @@ end
         {
             type = "checkbox",
             name = GetString(SI_BAV_SETTING_PRESET_STATE_COMBAT_NAME),
-            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_COMBAT_TOOLTIP),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_STATE_COMBAT_TOOLTIP),
             getFunc = function() return Settings.GetShoulderAutoState("combat") end,
             setFunc = function(value) Settings.SetShoulderAutoState("combat", value) end,
             width = "half",
@@ -1522,7 +1619,7 @@ end
         {
             type = "checkbox",
             name = GetString(SI_BAV_SETTING_PRESET_STATE_STEALTH_NAME),
-            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_STEALTH_TOOLTIP),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_STATE_STEALTH_TOOLTIP),
             getFunc = function() return Settings.GetShoulderAutoState("stealth") end,
             setFunc = function(value) Settings.SetShoulderAutoState("stealth", value) end,
             width = "half",
@@ -1533,7 +1630,7 @@ end
         {
             type = "checkbox",
             name = GetString(SI_BAV_SETTING_PRESET_STATE_MOUNTED_NAME),
-            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_MOUNTED_TOOLTIP),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_STATE_MOUNTED_TOOLTIP),
             getFunc = function() return Settings.GetShoulderAutoState("mounted") end,
             setFunc = function(value) Settings.SetShoulderAutoState("mounted", value) end,
             width = "half",
@@ -1544,7 +1641,7 @@ end
         {
             type = "checkbox",
             name = GetString(SI_BAV_SETTING_PRESET_STATE_SWIMMING_NAME),
-            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_SWIMMING_TOOLTIP),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_STATE_SWIMMING_TOOLTIP),
             getFunc = function() return Settings.GetShoulderAutoState("swimming") end,
             setFunc = function(value) Settings.SetShoulderAutoState("swimming", value) end,
             width = "half",
@@ -1555,7 +1652,7 @@ end
         {
             type = "checkbox",
             name = GetString(SI_BAV_SETTING_PRESET_STATE_SPRINT_NAME),
-            tooltip = GetString(SI_BAV_SETTING_PRESET_STATE_SPRINT_TOOLTIP),
+            tooltip = GetString(SI_BAV_SETTING_SHOULDER_STATE_SPRINT_TOOLTIP),
             getFunc = function() return Settings.GetShoulderAutoState("sprint") end,
             setFunc = function(value) Settings.SetShoulderAutoState("sprint", value) end,
             width = "half",
@@ -1567,7 +1664,9 @@ end
         },
         {
             type = "submenu",
-            name = GetString(SI_BAV_HEADER_VELOCITY_FOV),
+            name = function()
+                return GetString(SI_BAV_HEADER_VELOCITY_FOV) .. "  " .. BoolTag(Settings.IsVelocityFovEnabled())
+            end,
             tooltip = GetString(SI_BAV_SECTION_VELOCITY_FOV_DESCRIPTION),
             controls = {
         {

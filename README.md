@@ -150,6 +150,14 @@ nothing on clients where the FOV property is unsupported.
   timing, and a rejected write is retried a bounded number of times rather than
   leaving the view half-moved. A sustained run of rejected camera-distance
   writes is surfaced by `/bav selfcheck`.
+- **Known interaction: camera-probing addons.** Some addons (notably *Miat's
+  PvP* / PvpAlerts) measure the camera by toggling first person several times in
+  a single frame. With older BAV builds this could briefly force or stick the
+  view in first person. The convergent toggle handling above neutralizes it on
+  BAV's side - the probe cancels out to no net change - so the two run together
+  with no special configuration. If a view ever feels stuck, `/bav reset`
+  returns control immediately. A proper upstream fix (the probe only firing when
+  its result is actually needed) would remove the interaction at the source.
 
 ---
 
