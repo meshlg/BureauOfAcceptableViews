@@ -34,6 +34,12 @@ local ShoulderControl = addon.ShoulderControl
 
 local CameraSettings = addon.CameraSettings
 
+-- The shared options-window watcher (OptionsWatch.lua): owns the fragment
+-- subscription and the canonical IsOpen() suspend-gate, replacing this module's
+-- own fragment callback + optionsOpen flag. Resolved eagerly because OptionsWatch
+-- loads before ShoulderControl in the manifest.
+local OptionsWatch = addon.OptionsWatch
+
 -- Hot-path / library globals bound to locals once at load.
 local tonumber = tonumber
 local pairs    = pairs
@@ -66,8 +72,9 @@ local SHOULDER_KEY = "shoulder"
 -- binary swap needs no priority resolution, unlike ContextPresets' bundles).
 local AUTO_STATES = { "combat", "stealth", "mounted", "swimming", "sprint" }
 
--- Sprint sample cadence, matching ContextPresets / VelocityFov.
-local POLL_MS = 150
+-- Sprint sample cadence, shared with ContextPresets via the core constants so the
+-- two poll on the exact same interval. Falls back to 150 if unavailable at load.
+local POLL_MS = (private.constants and private.constants.SPRINT_POLL_MS) or 150
 
 -- ---------------------------------------------------------------------------
 -- Runtime state
@@ -87,7 +94,6 @@ local controller = {
     baseShoulder = nil,
     activeSide  = SIDE_CENTER,
     polling     = false,
-    optionsOpen = false,
     recovered   = false,
 }
 
@@ -188,7 +194,7 @@ end
 -- center while options are open (the player may be editing shoulder), disabled, or
 -- before load-time recovery has run.
 local function ResolveSide()
-    if controller.mode == MODE_OFF or controller.optionsOpen or not controller.recovered then
+    if controller.mode == MODE_OFF or OptionsWatch.IsOpen() or not controller.recovered then
         return SIDE_CENTER
     end
 
@@ -246,21 +252,12 @@ local function OnNotSwimmingState(_)
     SetPhysical("swimming", false)
 end
 
--- Sprint detection mirrors ContextPresets.IsPlayerSprinting / VelocityFov so all
--- three agree on what "sprinting" means.
-local function IsPlayerSprinting()
-    local lib = LibSprint
-    if lib ~= nil and lib.isPlayerSprinting ~= nil then
-        return lib.isPlayerSprinting and true or false
-    end
-    if IsGameCameraUIModeActive and IsGameCameraUIModeActive() then
-        return false
-    end
-    return IsShiftKeyDown() and IsPlayerMoving()
-end
-
+-- Sprint detection lives in the core (private.IsPlayerSprinting) so ContextPresets
+-- and ShoulderControl agree on what "sprinting" means; resolved lazily at poll
+-- time so load order cannot matter.
 local function PollSprint()
-    SetPhysical("sprint", IsPlayerSprinting())
+    local detect = private.IsPlayerSprinting
+    SetPhysical("sprint", detect ~= nil and detect() or false)
 end
 
 local function StartSprintPolling()
@@ -311,50 +308,26 @@ end
 -- ---------------------------------------------------------------------------
 -- While the ESO settings window is open the player may edit the real shoulder
 -- setting. Hand it back (restore base) and suspend evaluation, then re-apply on
--- close -- mirroring ContextPresets' options handling.
-local OPTIONS_FRAGMENT = OPTIONS_WINDOW_FRAGMENT
+-- close -- mirroring ContextPresets' options handling. The open/closed lifecycle
+-- is owned by the shared OptionsWatch; ResolveSide reads OptionsWatch.IsOpen() as
+-- the suspend-gate, and these callbacks just re-evaluate on each edge.
+local OPTIONS_WATCH_NAME = "ShoulderControl"
 
 local function OnOptionsOpened()
-    if controller.mode == MODE_OFF or controller.optionsOpen then
+    if controller.mode == MODE_OFF then
         return
     end
-    controller.optionsOpen = true
-    -- ResolveSide returns center while optionsOpen, so this restores the base.
+    -- ResolveSide returns center while OptionsWatch.IsOpen(), so this restores the base.
     Reevaluate()
 end
 
 local function OnOptionsClosed()
-    if not controller.optionsOpen then
-        return
-    end
-    controller.optionsOpen = false
     if controller.mode ~= MODE_OFF then
         -- The player may have edited their shoulder; the old base is stale. We are
         -- back at center (base restored on open), so a fresh swing re-captures the
         -- edited value as the new base on the next ApplySide.
         Reevaluate()
     end
-end
-
-local function OnOptionsFragmentStateChange(_, newState)
-    if newState == SCENE_FRAGMENT_SHOWN then
-        OnOptionsOpened()
-    elseif newState == SCENE_FRAGMENT_HIDDEN then
-        OnOptionsClosed()
-    end
-end
-
-local function RegisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.RegisterCallback then
-        OPTIONS_FRAGMENT:RegisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-end
-
-local function UnregisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.UnregisterCallback then
-        OPTIONS_FRAGMENT:UnregisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-    controller.optionsOpen = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -380,7 +353,7 @@ local function SetMode(newMode)
         StopSprintPolling()
     end
     if oldMode ~= MODE_OFF then
-        UnregisterOptionsEvents()
+        OptionsWatch.Unsubscribe(OPTIONS_WATCH_NAME)
     end
 
     -- Leaving an enabled mode entirely: hand the shoulder back to the player.
@@ -394,7 +367,10 @@ local function SetMode(newMode)
     controller.mode = newMode
 
     -- Set up the new mode's wiring.
-    RegisterOptionsEvents()
+    OptionsWatch.Subscribe(OPTIONS_WATCH_NAME, {
+        onOpen  = OnOptionsOpened,
+        onClose = OnOptionsClosed,
+    })
     if newMode == MODE_AUTO then
         RegisterStateEvents()
         SyncSprintPolling()
@@ -568,7 +544,8 @@ end
 --   hasBase         a pre-swing base is currently captured
 --   activeSide      the side currently applied
 --   sprintPolling   sprint poll timer is registered
---   optionsOpen     the ESO options window is open (swing reverted for editing)
+--   optionsOpen     the ESO options window is open (swing reverted for editing) --
+--                   shared state from OptionsWatch, not a per-module flag
 function ShoulderControl.GetDiagnostics()
     return {
         enabled       = controller.mode ~= MODE_OFF,
@@ -577,6 +554,6 @@ function ShoulderControl.GetDiagnostics()
         hasBase       = controller.baseShoulder ~= nil,
         activeSide    = controller.activeSide,
         sprintPolling = controller.polling,
-        optionsOpen   = controller.optionsOpen,
+        optionsOpen   = OptionsWatch.IsOpen(),
     }
 end

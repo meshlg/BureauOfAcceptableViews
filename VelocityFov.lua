@@ -56,6 +56,18 @@ local GetGameTimeMilliseconds = GetGameTimeMilliseconds
 local GetUnitWorldPosition    = GetUnitWorldPosition
 local WINDOW_MANAGER          = WINDOW_MANAGER
 
+-- The boost ramp runs through the shared Ease primitive (Ease.lua): Ease owns the
+-- register/progress/land/self-tear lifecycle, this module supplies only the payload
+-- (interpolate currentBoost and push it). The speed sampler keeps its own timer via
+-- EVENT_MANAGER above -- it is a fixed-cadence poll, not an ease. Resolved eagerly
+-- because Ease loads before VelocityFov in the manifest.
+local Ease = addon.Ease
+
+-- The shared options-window watcher (OptionsWatch.lua): owns the fragment
+-- subscription and the canonical IsOpen() suspend-gate. Resolved eagerly for the
+-- same reason (OptionsWatch loads before VelocityFov).
+local OptionsWatch = addon.OptionsWatch
+
 -- Logging helpers are generated in the core file and exported on private.
 -- Resolve them lazily so load order between files cannot break us.
 local function LogDebug(...)
@@ -103,8 +115,9 @@ local BOOST_EPSILON = 0.05
 -- ---------------------------------------------------------------------------
 -- Runtime state
 -- ---------------------------------------------------------------------------
--- All inert until Configure{enabled=true}. sampling/optionsOpen gate the speed
--- timer and the options-window suspension. lastZoneId/lastX/lastZ/lastSampleMs are
+-- All inert until Configure{enabled=true}. sampling gates the speed timer; the
+-- options-window suspension is now read from the shared OptionsWatch.IsOpen() (no
+-- per-module flag). lastZoneId/lastX/lastZ/lastSampleMs are
 -- the previous position sample (nil until the first sample baselines them).
 -- smoothedSpeed is the EMA-filtered speed (cm/s). currentBoost is what we last
 -- pushed; targetBoost is where the ramp is heading. debug toggles the on-screen
@@ -116,10 +129,6 @@ local controller = {
     currentBoost  = 0,
     targetBoost   = 0,
     sampling      = false,
-    optionsOpen   = false,
-    rampActive    = false,
-    rampFromBoost = 0,
-    rampStartMs   = nil,
     -- Position-sampling state for speed derivation.
     lastZoneId    = nil,
     lastX         = nil,
@@ -127,6 +136,13 @@ local controller = {
     lastSampleMs  = nil,
     smoothedSpeed = 0,
 }
+
+-- Ramp payload endpoint: the boost the current ease started from. Held as a module
+-- local (not captured per-call) so the step/land closures below are built ONCE and
+-- reused across retargets. currentBoost/targetBoost stay on the controller (read by
+-- diagnostics, SetEnabled, EmergencyRestore); "is the ramp running" is now
+-- Ease.IsActive(RAMP_NAME) rather than a controller flag.
+local rampFromBoost = 0
 
 local EVENT_NAMESPACE = "BAV_VelocityFov"
 local SAMPLE_NAME     = "BAV_VelocityFov_Sample"
@@ -139,9 +155,10 @@ local RAMP_NAME       = "BAV_VelocityFov_Ramp"
 -- Map a smoothed speed (cm/s) to a boost target (degrees). Below SPEED_MIN_CMS the
 -- boost is 0 (walking/jogging stays neutral); at/above SPEED_MAX_CMS it is the full
 -- sensitivity-scaled boost; linear in between. Returns 0 while disabled or while the
--- options window is open (the player may be editing FOV).
+-- options window is open (the player may be editing FOV) -- the latter read from the
+-- shared OptionsWatch, the single suspend-gate.
 local function ResolveTargetBoost()
-    if not controller.enabled or controller.optionsOpen then
+    if not controller.enabled or OptionsWatch.IsOpen() then
         return 0
     end
 
@@ -167,46 +184,43 @@ local function PushBoost()
 end
 
 -- ---------------------------------------------------------------------------
--- Boost ramp (self-tearing-down updater)
+-- Boost ramp (via the shared Ease primitive)
 -- ---------------------------------------------------------------------------
 -- Eases currentBoost from rampFromBoost toward targetBoost over RAMP_DURATION_MS,
--- pushing each interpolated value. Time-based (not a fixed step per frame) so the
--- ease feels identical at any frame rate. On the final frame it lands exactly and
--- unregisters itself, so an idle module carries no per-frame cost.
+-- pushing each interpolated value. The register/progress/land/self-tear lifecycle
+-- belongs to Ease; this section supplies only the payload (interpolate + push).
+-- Time-based (Ease uses GetGameTimeMilliseconds) so the ease feels identical at
+-- any frame rate, and an idle module carries no per-frame cost.
 
+-- Cancel any in-flight ramp. Idempotent (Ease.Stop is a no-op when not running).
 local function StopRamp()
-    if controller.rampActive then
-        EVENT_MANAGER:UnregisterForUpdate(RAMP_NAME)
-        controller.rampActive = false
-    end
-    controller.rampStartMs = nil
+    Ease.Stop(RAMP_NAME)
 end
 
-local function OnRampUpdate()
-    if not controller.rampActive or controller.rampStartMs == nil then
-        StopRamp()
-        return
-    end
-
-    local t = (GetGameTimeMilliseconds() - controller.rampStartMs) / RAMP_DURATION_MS
-    if t < 0 then t = 0 end
-
-    if t >= 1 then
-        -- Final frame: land exactly on the target and stop ramping.
-        controller.currentBoost = controller.targetBoost
-        StopRamp()
-        PushBoost()
-        return
-    end
-
-    controller.currentBoost = controller.rampFromBoost
-        + (controller.targetBoost - controller.rampFromBoost) * t
+-- Ramp payload, allocated once and reused across retargets (RampTo only rewrites
+-- rampFromBoost/targetBoost). onStep interpolates currentBoost and pushes it;
+-- onLand lands exactly on targetBoost and pushes. RampTo is reachable every sample
+-- tick, so a fresh closure/table per call would be recurring garbage.
+local function OnRampStep(t)
+    controller.currentBoost = rampFromBoost
+        + (controller.targetBoost - rampFromBoost) * t
     PushBoost()
 end
 
+local function OnRampLand()
+    controller.currentBoost = controller.targetBoost
+    PushBoost()
+end
+
+local RAMP_SPEC = {
+    durMs  = RAMP_DURATION_MS,
+    onStep = OnRampStep,
+    onLand = OnRampLand,
+}
+
 -- Retarget the ramp toward a new boost. Snaps instantly (no updater) when already
--- within an epsilon; otherwise (re)starts the temporary ramp updater, easing from
--- the LIVE currentBoost over a fresh window so a re-target never snaps back.
+-- within an epsilon; otherwise (re)starts the ramp via Ease, easing from the LIVE
+-- currentBoost over a fresh window so a re-target never snaps back.
 local function RampTo(target)
     controller.targetBoost = target
 
@@ -217,12 +231,11 @@ local function RampTo(target)
         return
     end
 
-    controller.rampFromBoost = controller.currentBoost
-    controller.rampStartMs = GetGameTimeMilliseconds()
-    if not controller.rampActive then
-        controller.rampActive = true
-        EVENT_MANAGER:RegisterForUpdate(RAMP_NAME, 0, OnRampUpdate)
-    end
+    -- Rewrite the shared start endpoint and (re)start the ease. Ease.Start
+    -- retargets in place when one is already running, so the ramp path allocates
+    -- nothing (reuses RAMP_SPEC and its closures).
+    rampFromBoost = controller.currentBoost
+    Ease.Start(RAMP_NAME, RAMP_SPEC)
 end
 
 -- ---------------------------------------------------------------------------
@@ -431,46 +444,25 @@ end
 -- ---------------------------------------------------------------------------
 -- While the ESO settings window is open the player may edit the real FOV. Like
 -- ContextPresets, we suspend (push boost 0) so we are not adding a boost on top of
--- the value they are editing, then re-evaluate on close.
-local OPTIONS_FRAGMENT = OPTIONS_WINDOW_FRAGMENT
+-- the value they are editing, then re-evaluate on close. The open/closed lifecycle
+-- is owned by the shared OptionsWatch; this module supplies only the payload and
+-- reads OptionsWatch.IsOpen() in ResolveTargetBoost as the suspend-gate.
+local OPTIONS_WATCH_NAME = "VelocityFov"
 
 local function OnOptionsOpened()
-    if not controller.enabled or controller.optionsOpen then
+    -- ResolveTargetBoost returns 0 while OptionsWatch.IsOpen(), so this ramps the
+    -- boost down to 0 for editing. Guarded on enabled so a disabled module (which
+    -- pushes no boost anyway) does nothing.
+    if not controller.enabled then
         return
     end
-    controller.optionsOpen = true
-    RampTo(ResolveTargetBoost())  -- target resolves to 0 while options are open
+    RampTo(ResolveTargetBoost())
 end
 
 local function OnOptionsClosed()
-    if not controller.optionsOpen then
-        return
-    end
-    controller.optionsOpen = false
     if controller.enabled then
         RampTo(ResolveTargetBoost())
     end
-end
-
-local function OnOptionsFragmentStateChange(_, newState)
-    if newState == SCENE_FRAGMENT_SHOWN then
-        OnOptionsOpened()
-    elseif newState == SCENE_FRAGMENT_HIDDEN then
-        OnOptionsClosed()
-    end
-end
-
-local function RegisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.RegisterCallback then
-        OPTIONS_FRAGMENT:RegisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-end
-
-local function UnregisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.UnregisterCallback then
-        OPTIONS_FRAGMENT:UnregisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-    controller.optionsOpen = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -486,7 +478,10 @@ local function SetEnabled(enabled)
     if enabled then
         controller.enabled = true
         RegisterStateEvents()
-        RegisterOptionsEvents()
+        OptionsWatch.Subscribe(OPTIONS_WATCH_NAME, {
+            onOpen  = OnOptionsOpened,
+            onClose = OnOptionsClosed,
+        })
         SyncSampling()  -- starts the sampler (also covers the debug-only case)
         -- No boost until the first speed reading; nothing to apply yet.
     else
@@ -500,7 +495,7 @@ local function SetEnabled(enabled)
         -- Tear down events/sampler only if debug is not still keeping them alive.
         if not controller.debug then
             UnregisterStateEvents()
-            UnregisterOptionsEvents()
+            OptionsWatch.Unsubscribe(OPTIONS_WATCH_NAME)
             SyncSampling()  -- stops the sampler now that neither feature nor debug wants it
         end
     end
@@ -568,7 +563,7 @@ end
 -- saved settings -- it recovers the camera, then normal sampling resumes. Returns
 -- true if a boost was actually being applied.
 function VelocityFov.EmergencyRestore()
-    local didSomething = controller.currentBoost ~= 0 or controller.rampActive
+    local didSomething = controller.currentBoost ~= 0 or Ease.IsActive(RAMP_NAME)
 
     StopRamp()
     controller.targetBoost = 0
@@ -589,16 +584,17 @@ end
 --   ramping        the ramp updater is registered
 --   speed          current smoothed speed (cm/s), surfaced for in-game calibration
 --   debug          the on-screen debug overlay is showing
---   optionsOpen    the ESO options window is open (boost suspended)
+--   optionsOpen    the ESO options window is open (boost suspended) -- shared state
+--                  from OptionsWatch, not a per-module flag
 function VelocityFov.GetDiagnostics()
     return {
         enabled      = controller.enabled,
         sampling     = controller.sampling,
         currentBoost = controller.currentBoost,
         targetBoost  = controller.targetBoost,
-        ramping      = controller.rampActive,
+        ramping      = Ease.IsActive(RAMP_NAME),
         speed        = controller.smoothedSpeed,
         debug        = controller.debug,
-        optionsOpen  = controller.optionsOpen,
+        optionsOpen  = OptionsWatch.IsOpen(),
     }
 end

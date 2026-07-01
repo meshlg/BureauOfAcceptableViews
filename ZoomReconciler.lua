@@ -45,6 +45,7 @@ local ZoomReconciler = addon.ZoomReconciler
 
 -- Library globals bound to locals once at load.
 local EVENT_MANAGER = EVENT_MANAGER
+local tonumber       = tonumber
 
 -- ZOOM_FPV is the shared first-person sentinel (camera distance 0.0). Read it
 -- from the main file's constant contract so there is a single source of truth.
@@ -180,7 +181,13 @@ function ZoomReconciler.HandleToggle()
     else
         -- third person -> FPV: remember the third-person distance first (only if
         -- it is a "normal" zoom past the threshold), mirroring the old handler.
-        if desiredZoom > private.GetConfiguredLastZoomThreshold() then
+        -- Skip the remember while a preset (ContextPresets) is actively overriding
+        -- distance: desiredZoom would then be the preset's offset framing, not the
+        -- player's own preferred zoom, and saving it would pollute lastZoom with a
+        -- cinematic distance that resurfaces long after the preset clears.
+        local presets = addon.ContextPresets
+        local presetOverriding = presets and presets.GetActiveState and presets.GetActiveState() ~= "default"
+        if desiredZoom > private.GetConfiguredLastZoomThreshold() and not presetOverriding then
             private.SetLastZoom(desiredZoom)
         end
         desiredZoom = ZOOM_FPV
@@ -194,6 +201,26 @@ function ZoomReconciler.HandleToggle()
     Schedule()
     LogDebug(SI_BAV_LOG_TOGGLE_HANDLED)
     return true
+end
+
+-- Re-seed the intent to match a distance some OTHER module just wrote directly
+-- (e.g. ContextPresets applying a preset's distance via CameraSettings.Set,
+-- which bypasses this module entirely). Without this, desiredZoom keeps
+-- pointing at whatever the last owned toggle left it at; a same-frame probe
+-- pair arriving after that direct write would flip relative to the STALE
+-- intent and the deferred reconcile would drag the camera back to it instead
+-- of the preset's distance -- the "two systems touch camera distance" flicker.
+-- No-op while a reconcile is already pending, so it can never race the write
+-- OnReconcileUpdate is about to make.
+function ZoomReconciler.SyncIntent(zoom)
+    if pending then
+        return
+    end
+    zoom = tonumber(zoom)
+    if zoom == nil then
+        return
+    end
+    desiredZoom = zoom
 end
 
 -- Read-only snapshot for /bav dump and the self-check. Fresh table so callers

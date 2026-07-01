@@ -5,7 +5,7 @@ local SAVED_VARIABLES_NAME = "BureauOfAcceptableViews_SavedVariables"
 BureauOfAcceptableViews = {
     name = ADDON_NAME,
     savedVariablesName = SAVED_VARIABLES_NAME,
-    version = "2.1.29062140",
+    version = "2.2.01071418",
     debugMode = 1,  -- 0=off, 1=errors, 2=warnings, 3=info, 4=verbose
 }
 
@@ -163,6 +163,13 @@ private.constants = {
     ZOOM_STEP_MIN = ZOOM_STEP_MIN,
     ZOOM_STEP_MAX = ZOOM_STEP_MAX,
     CONFIG_MIN_THIRD_PERSON_ZOOM = CONFIG_MIN_THIRD_PERSON_ZOOM,
+
+    -- Shared sprint-poll cadence (ms). ContextPresets and ShoulderControl both
+    -- sample sprint on this one interval, so the two agree structurally rather
+    -- than through duplicated magic numbers. (VelocityFov samples on its own
+    -- equal-valued cadence, but that is a speed sampler -- a different concept --
+    -- so it stays separate.)
+    SPRINT_POLL_MS = 150, -- = 6.66 Hz, which is a good balance between responsiveness and CPU load... or the frequency where the devil whispers to your microcontroller to mess up the timing and send everything to hell...
 }
 
 -- These defaults are a shared contract consumed by Settings.lua and must not
@@ -496,8 +503,26 @@ end
 -- window. Counts only genuine state changes -- never raw hook calls -- so the
 -- balanced same-frame measurement pairs other addons make do not register. No
 -- timer/poll: this runs only when the engine already called the toggle.
+--
+-- Owned toggles (limited state, or leaving FPV) are handled specially: their
+-- actual camera write is DEFERRED to ZoomReconciler's next-frame reconcile, so
+-- GetCameraZoom() here can still read the PRE-toggle distance for a same-frame
+-- probe pair's second call (the first call's write has not landed yet). Reading
+-- live zoom in that case would silently under-count the pair's second flip. Since
+-- ZoomReconciler.HandleToggle takes ownership on every call in this branch (its
+-- own ownership test mirrors the one below), each call reaching here IS a genuine
+-- intent flip regardless of whether the write has landed -- so we flip our
+-- tracked state unconditionally instead of re-deriving it from the live camera.
 local function NoteViewStateAndCheckOscillation(nowMs)
-    local isFpv = GetCameraZoom() <= ZOOM_FPV
+    local zoom = GetCameraZoom()
+    local owned = IsZoomLimited() or zoom <= ZOOM_FPV
+    local isFpv
+    if owned then
+        isFpv = not lastObservedFpv
+    else
+        isFpv = zoom <= ZOOM_FPV
+    end
+
     if lastObservedFpv == nil then
         lastObservedFpv = isFpv
         return
@@ -1018,6 +1043,37 @@ local function SetTogglingFPV(value)
     isTogglingFPV = value and true or false
 end
 
+-- Shared sprint detection, consumed by both the ContextPresets sprint bundle and
+-- the ShoulderControl auto-swing. Kept here (not copied per module) so the two
+-- agree on what "sprinting" means structurally rather than by matching copies.
+-- Stateless: reads only live engine/library state, so it is safe to call from any
+-- module's poll tick.
+--
+-- DETECTION: the client exposes no reliable "is sprinting" query. When LibSprint
+-- is present we read its computed isPlayerSprinting flag -- it detects sprint via
+-- action-slot highlighting, so it works regardless of how the player bound sprint
+-- (and on gamepad). LibSprint has no callback to subscribe to (only the polled
+-- flag), so callers still poll; the library only buys a more accurate reading.
+--
+-- FALLBACK (no LibSprint): read the Shift key (ESO's default sprint bind) via
+-- IsShiftKeyDown(), gated on IsPlayerMoving() so holding Shift while standing
+-- still does not count, AND on the game camera owning input (not
+-- IsGameCameraUIModeActive()) so holding Shift while moving in a menu/cursor mode
+-- -- inventory, map, the options window -- is not mistaken for sprinting. This
+-- assumes the default Shift bind; install LibSprint for bind-agnostic, gamepad-
+-- correct detection.
+local function IsPlayerSprinting()
+    local lib = LibSprint
+    if lib ~= nil and lib.isPlayerSprinting ~= nil then
+        return lib.isPlayerSprinting and true or false
+    end
+    -- Fallback heuristic when LibSprint is not installed.
+    if IsGameCameraUIModeActive and IsGameCameraUIModeActive() then
+        return false
+    end
+    return IsShiftKeyDown() and IsPlayerMoving()
+end
+
 private.ChatInfo = ChatInfo
 private.ChatError = ChatError
 private.GetLocalizedBoolean = GetLocalizedBoolean
@@ -1045,6 +1101,10 @@ private.QueueSave = QueueSave
 private.GetConfiguredLastZoomThreshold = GetConfiguredLastZoomThreshold
 private.GetConfiguredMinMountedZoom = GetConfiguredMinMountedZoom
 private.SetTogglingFPV = SetTogglingFPV
+
+-- Shared sprint detector: ContextPresets and ShoulderControl both resolve this
+-- lazily off private at poll time, so they detect sprint identically.
+private.IsPlayerSprinting = IsPlayerSprinting
 
 -- Read-only conflict/backoff diagnostics for SelfCheck and /bav dump. Returns a
 -- fresh flat table so callers cannot mutate detector state. Folds in the

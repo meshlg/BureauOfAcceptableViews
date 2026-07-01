@@ -178,6 +178,13 @@ nothing on clients where the FOV property is unsupported.
 - **One owner per contested setting.** Just as `FovArbiter` owns the FOV, shoulder
   swap takes sole ownership of the shoulder offset while it is on, so it and the
   stealth preset never write the same value out of turn.
+- **One implementation per repeated pattern.** Where several modules grew the same
+  mechanism, it lives in one place: `Ease` owns the self-tearing glide lifecycle for
+  every animated value (FOV smoothing, the velocity ramp, preset transitions),
+  `OptionsWatch` owns the single settings-window subscription every feature suspends
+  on, and one sprint-detection helper is shared rather than copied. Each caller
+  supplies only its payload, so a fix or a client change lands once, not in four
+  near-identical copies.
 - **Convergent toggle handling.** In the states BAV manages, a first-person
   toggle does not write the camera on the spot. A dedicated `ZoomReconciler`
   records *where the camera should settle* and performs a single write on the
@@ -245,6 +252,13 @@ hierarchy: a read-only observer that never writes to the camera or settings. It
 lazily polls the other modules' diagnostics accessors and counts the entries in
 BAV-owned tables, so it depends on no one and its absence changes nothing.
 
+`Ease` and `OptionsWatch` sit *below* everything as shared leaf primitives: the
+consumers call into them, they call back through payload callbacks, and neither
+depends on another module. `Ease` owns the self-tearing updater behind every glide;
+`OptionsWatch` owns the one settings-window subscription and the canonical
+open/closed state features suspend on. Factoring the repeated mechanism into one
+place is what keeps a fix or a client change a single edit.
+
 ---
 
 ## Module overview
@@ -253,6 +267,9 @@ BAV-owned tables, so it depends on no one and its absence changes nothing.
 | --- | --- |
 | `BureauOfAcceptableViews.lua` | Core: free-zoom logic, event wiring, saved-variable lifecycle, slash commands. |
 | `CameraSettings.lua` | The single, verified access layer for every engine camera setting. |
+| `ZoomReconciler.lua` | Single owner of where the camera settles after a BAV-handled first-person toggle; defers one coalesced write so probe pairs cancel out. |
+| `Ease.lua` | Shared time-based easing primitive: one self-tearing updater lifecycle behind every glide (FOV smoothing, velocity boost ramp, preset transition). |
+| `OptionsWatch.lua` | Shared watcher for the settings window: one fragment subscription and the canonical open/closed state every feature suspends on. |
 | `DynamicFov.lua` | Optional zoom-dependent field of view; composes a velocity boost on top. |
 | `VelocityFov.lua` | Optional speed-reactive FOV boost from real movement speed, routed through the arbiter. |
 | `FovArbiter.lua` | Single owner of third-person FOV precedence (dynamic + velocity vs. preset holds). |

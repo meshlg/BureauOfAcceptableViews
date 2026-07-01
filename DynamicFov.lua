@@ -30,19 +30,20 @@ local DynamicFov = addon.DynamicFov
 local tonumber = tonumber
 local mathabs  = math.abs
 
--- Engine handles for the optional smoothing animation. The animation is the one
--- place this module steps outside the addon's PULL/event-only rule, and it does
--- so the same way the core's save timer already does: a *temporary*
--- RegisterForUpdate that unregisters itself the moment the transition finishes,
--- so there is no standing per-frame cost when FOV is not actively moving.
-local EVENT_MANAGER             = EVENT_MANAGER
-local GetGameTimeMilliseconds   = GetGameTimeMilliseconds
-local ANIM_UPDATE_NAME          = "BAV_DynamicFovSmoothing"
+-- The optional smoothing glide runs through the shared Ease primitive (Ease.lua)
+-- instead of a hand-rolled updater: a temporary per-frame updater that eases FOV
+-- toward its target and tears itself down the moment it lands, so there is no
+-- standing per-frame cost when FOV is not moving. This module supplies only the
+-- payload (which FOV to write each step); Ease owns the register/progress/land/
+-- self-tear lifecycle. Resolved eagerly here because Ease loads before this file
+-- in the manifest (same as CameraSettings below).
+local Ease = addon.Ease
+local ANIM_UPDATE_NAME = "BAV_DynamicFovSmoothing"
 
 -- Total time (ms) for a smoothed FOV transition. Short enough to feel immediate,
 -- long enough to read as a glide rather than a snap. Each zoom step restarts the
 -- animation from the live FOV, so overlapping steps chain smoothly.
-local ANIM_DURATION_MS          = 150
+local ANIM_DURATION_MS = 150
 
 -- Logging helpers are generated in the core file and exported on private.
 -- Resolve them lazily so load order between files cannot break us.
@@ -84,14 +85,6 @@ local manualBaseFov = nil
 -- The last FOV we wrote, so we can skip redundant CameraSettings.Set calls when
 -- the interpolated value has not meaningfully changed since the last apply.
 local lastAppliedFov = nil
-
--- Smoothing animation state. All nil/false while no transition is running, so a
--- disabled or idle module carries no animation bookkeeping. animActive gates the
--- temporary RegisterForUpdate; the rest describe the in-flight glide.
-local animActive    = false
-local animFromFov   = nil   -- FOV at the moment the current glide started
-local animToFov     = nil   -- FOV the current glide is heading toward
-local animStartMs   = nil   -- GetGameTimeMilliseconds() when the glide started
 
 -- Two writes closer than this are treated as identical (matches the FOV
 -- setting's two-decimal precision with a little slack).
@@ -155,22 +148,27 @@ end
 -- ---------------------------------------------------------------------------
 -- Smoothing animation
 -- ---------------------------------------------------------------------------
--- The glide is driven by a temporary RegisterForUpdate that tears itself down
--- when the transition completes. This mirrors the core save timer's lifecycle:
--- nothing runs per-frame unless a transition is actually in progress.
+-- The glide runs through the shared Ease primitive: a temporary updater that
+-- tears itself down when the transition completes. This module supplies only the
+-- payload (which FOV to write); Ease owns the register/progress/land/self-tear
+-- lifecycle, so nothing runs per-frame unless a transition is in progress.
 
--- Tear down the per-frame updater and clear animation state. Safe to call when
--- no animation is running (idempotent), so it doubles as the "cancel" path used
--- when the feature is turned off or reconfigured.
+-- Cancel any in-flight smoothing glide. Idempotent (Ease.Stop is a no-op when the
+-- ease is not running), so it doubles as the "cancel" path used when the feature
+-- is turned off or reconfigured.
 local function StopAnimation()
-    if animActive then
-        EVENT_MANAGER:UnregisterForUpdate(ANIM_UPDATE_NAME)
-    end
-    animActive  = false
-    animFromFov = nil
-    animToFov   = nil
-    animStartMs = nil
+    Ease.Stop(ANIM_UPDATE_NAME)
 end
+
+-- Payload endpoints for the smoothing glide: the from/to FOV of the current ease.
+-- Held as module locals (not captured per-call) so the step/land closures and the
+-- ease spec below can be built ONCE and reused on every retarget. StartAnimation is
+-- reachable per-frame (a velocity-FOV ramp pushes a boost each frame while smoothing
+-- is on), so a fresh closure/table per call would be per-frame garbage -- exactly the
+-- GC pressure this addon avoids. Only one smoothing ease exists at a time (one name),
+-- so a single shared endpoint pair is safe.
+local animFrom = nil
+local animTo   = nil
 
 -- Write an FOV value through CameraSettings and update the dedup cache. Returns
 -- true only on a verified write. Centralized so both the instant and animated
@@ -183,35 +181,27 @@ local function WriteFov(fov)
     return true
 end
 
--- Per-frame step of the glide. Interpolates from animFromFov to animToFov over
--- ANIM_DURATION_MS, writing the intermediate FOV each frame. On the final frame
--- it pins the exact target and unregisters itself, so the updater only lives for
--- the duration of the transition.
-local function OnAnimationUpdate()
-    if not animActive or animStartMs == nil then
-        StopAnimation()
-        return
-    end
-
-    local elapsed = GetGameTimeMilliseconds() - animStartMs
-    local t = elapsed / ANIM_DURATION_MS
-    if t < 0 then t = 0 end
-
-    if t >= 1 then
-        -- Final frame: land exactly on the target and stop.
-        WriteFov(animToFov)
-        StopAnimation()
-        return
-    end
-
-    local current = animFromFov + (animToFov - animFromFov) * t
-    WriteFov(current)
+-- The glide payload, allocated once. onStep writes the interpolated FOV each frame;
+-- onLand writes the exact target. Both read the module-local endpoints above, so a
+-- retarget only rewrites animFrom/animTo and restarts Ease's clock -- no new closures
+-- and no new spec table, even when StartAnimation runs every frame during a ramp.
+local function OnSmoothStep(t)
+    WriteFov(animFrom + (animTo - animFrom) * t)
 end
+
+local function OnSmoothLand()
+    WriteFov(animTo)
+end
+
+local SMOOTH_SPEC = {
+    durMs  = ANIM_DURATION_MS,
+    onStep = OnSmoothStep,
+    onLand = OnSmoothLand,
+}
 
 -- Begin (or retarget) a glide toward targetFov. The start point is the live FOV
 -- so an in-flight glide retargets smoothly from wherever it currently is rather
--- than jumping back to a stale value. Registers the temporary updater only when
--- one is not already running. Returns true if a glide is now in progress.
+-- than jumping back to a stale value. Returns true if a glide is now in progress.
 local function StartAnimation(targetFov)
     local startFov = lastAppliedFov
     if startFov == nil then
@@ -219,20 +209,18 @@ local function StartAnimation(targetFov)
         startFov = ok and current or targetFov
     end
 
-    -- Already there: nothing to animate.
+    -- Already there: nothing to animate. Stop any in-flight ease and pin exactly.
     if mathabs(targetFov - startFov) <= FOV_EPSILON then
         StopAnimation()
         return WriteFov(targetFov)
     end
 
-    animFromFov = startFov
-    animToFov   = targetFov
-    animStartMs = GetGameTimeMilliseconds()
-
-    if not animActive then
-        animActive = true
-        EVENT_MANAGER:RegisterForUpdate(ANIM_UPDATE_NAME, 0, OnAnimationUpdate)
-    end
+    -- Rewrite the shared endpoints and (re)start the ease over a fresh window.
+    -- Ease.Start retargets in place when one is already running, so this allocates
+    -- nothing on the per-frame ramp path (reuses SMOOTH_SPEC and its closures).
+    animFrom = startFov
+    animTo   = targetFov
+    Ease.Start(ANIM_UPDATE_NAME, SMOOTH_SPEC)
     return true
 end
 
@@ -388,7 +376,7 @@ function DynamicFov.GetDiagnostics()
         engaged            = DynamicFov.IsEngaged(),
         velocityBoost      = config.velocityBoost,
         manualBaseCaptured = manualBaseFov ~= nil,
-        animating          = animActive,
+        animating          = Ease.IsActive(ANIM_UPDATE_NAME),
     }
 end
 

@@ -1216,7 +1216,7 @@ end
         type = "panel",
         name = GetString(SI_BAV_PANEL_NAME),
         displayName = GetString(SI_BAV_PANEL_DISPLAY_NAME),
-        author = "|c6FCB9Fmeshlg|r",
+        author = "|c6FCB9Fmeshlg|r @ArtieFox",
         version = addon.version,
         registerForRefresh = true,
         registerForDefaults = false,

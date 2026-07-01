@@ -36,11 +36,15 @@ local FovArbiter = addon.FovArbiter
 
 local CameraSettings = addon.CameraSettings
 
+-- The shared easing primitive (Ease.lua) drives the optional FOV glide, replacing
+-- this module's hand-rolled updater: Ease owns register/progress/land/self-tear,
+-- this module supplies only the payload (which FOV to write). Resolved eagerly
+-- because Ease loads before FovArbiter in the manifest (same as CameraSettings).
+local Ease = addon.Ease
+
 -- Hot-path / library globals bound to locals once at load.
 local tonumber = tonumber
 local type     = type
-local EVENT_MANAGER          = EVENT_MANAGER
-local GetGameTimeMilliseconds = GetGameTimeMilliseconds
 
 -- Logging resolved lazily so file load order cannot break us.
 local function LogDebug(...)
@@ -62,26 +66,24 @@ local FOV_KEY = "thirdPersonFov"
 local holdSource = nil
 
 -- ---------------------------------------------------------------------------
--- FOV glide state (self-tearing-down updater)
+-- FOV glide state (via the shared Ease primitive)
 -- ---------------------------------------------------------------------------
 -- A hold may optionally EASE the pinned FOV toward its target instead of
 -- snapping. The glide lives HERE, in the sole owner of FOV, rather than in
 -- ContextPresets: while a hold is active RequestDynamic is suppressed, so no
--- dynamic zoom tick can fight the animation. The updater is temporary -- it
--- registers on glide start and unregisters itself on the final frame -- so an
--- idle arbiter carries no per-frame cost. Mirrors the discipline ContextPresets
--- uses for its spatial glide.
+-- dynamic zoom tick can fight the animation. The lifecycle (temporary updater
+-- that self-tears on the final frame) belongs to Ease; this module supplies the
+-- payload -- the interpolated FOV write -- and the liveness guard below.
 local GLIDE_UPDATE_NAME = "BAV_FovArbiter_Glide"
 
--- All nil/false while no glide runs. active gates the temporary updater; the
--- rest describe the in-flight ease and the exact landing value.
-local glide = {
-    active  = false,
-    startMs = nil,
-    from    = nil,
-    to      = nil,
-    durMs   = nil,
-}
+-- Payload endpoints for the current glide, held as module locals (not captured
+-- per-call) so the step/land/isLive closures can be built ONCE and reused across
+-- retargets. Only one glide exists at a time (one name), so a single shared
+-- endpoint set is safe. durMs is per-glide (BeginHold passes it), so it is stored
+-- here and read back into the spec on each StartGlide.
+local glideFrom  = nil
+local glideTo    = nil
+local glideDurMs = nil
 
 -- Forward declaration: StopGlide is used by BeginHold/EndHold/ForceRelease,
 -- which are defined before the glide machinery further down.
@@ -106,11 +108,18 @@ function FovArbiter.IsHeld()
     return holdSource ~= nil
 end
 
+-- Returns the name of the module currently holding FOV, or nil when free. Lets
+-- callers (SelfCheck) attribute an active hold to its actual owner instead of
+-- assuming a single hardcoded source.
+function FovArbiter.GetHoldSource()
+    return holdSource
+end
+
 -- Returns true while a FOV glide is easing toward its target. Exposed so the
 -- self-check can flag an orphaned updater (gliding while nothing should own
 -- FOV) and so diagnostics can report it.
 function FovArbiter.IsGliding()
-    return glide.active
+    return Ease.IsActive(GLIDE_UPDATE_NAME)
 end
 
 -- Begin a hold under the given source name and optionally pin an FOV value.
@@ -319,55 +328,42 @@ end
 -- ---------------------------------------------------------------------------
 -- Defined after the public hold API so it can stay file-local, and assigned to
 -- the forward-declared StopGlide/StartGlide locals that BeginHold/EndHold/
--- ForceRelease already reference.
+-- ForceRelease already reference. The lifecycle is Ease's; this section is only
+-- the payload (interpolated FOV write) plus the liveness guard.
 
--- Tear down the per-frame updater and clear glide state. Idempotent, so it also
--- serves as the cancel path when a hold ends or retargets mid-glide. Assigned to
--- the forward-declared local rather than declared fresh.
+-- Cancel any in-flight glide. Idempotent (Ease.Stop is a no-op when not running),
+-- so it also serves as the cancel path when a hold ends or retargets mid-glide.
+-- Assigned to the forward-declared local rather than declared fresh.
 function StopGlide()
-    if glide.active then
-        EVENT_MANAGER:UnregisterForUpdate(GLIDE_UPDATE_NAME)
-    end
-    glide.active  = false
-    glide.startMs = nil
-    glide.from    = nil
-    glide.to      = nil
-    glide.durMs   = nil
+    Ease.Stop(GLIDE_UPDATE_NAME)
 end
 
--- Per-frame step of the glide. Eases linearly from glide.from to glide.to over
--- glide.durMs, writing the intermediate FOV each frame. On the final frame it
--- pins the exact target and unregisters itself, so the updater only lives for
--- the duration of the transition. A failed write mid-glide is non-fatal: the
--- next frame retries and the final frame writes the exact target regardless.
-local function OnGlideUpdate()
-    if not glide.active or glide.startMs == nil then
-        StopGlide()
-        return
-    end
-
-    -- A glide is only meaningful while its hold owns FOV. If the hold vanished
-    -- (it should have called StopGlide, but be defensive), abandon the glide
-    -- rather than fighting whatever now drives FOV.
-    if holdSource == nil then
-        StopGlide()
-        return
-    end
-
-    local elapsed = GetGameTimeMilliseconds() - glide.startMs
-    local t = elapsed / glide.durMs
-    if t < 0 then t = 0 end
-
-    if t >= 1 then
-        -- Final frame: land exactly on the target and stop.
-        CameraSettings.Set(FOV_KEY, glide.to)
-        StopGlide()
-        return
-    end
-
-    local current = glide.from + (glide.to - glide.from) * t
-    CameraSettings.Set(FOV_KEY, current)
+-- Glide payload, allocated once and reused across retargets (StartGlide only
+-- rewrites the module-local endpoints). onStep writes the interpolated FOV each
+-- frame; onLand writes the exact target. A failed write mid-glide is non-fatal:
+-- the next frame retries and onLand writes the exact target regardless.
+local function OnGlideStep(t)
+    CameraSettings.Set(FOV_KEY, glideFrom + (glideTo - glideFrom) * t)
 end
+
+local function OnGlideLand()
+    CameraSettings.Set(FOV_KEY, glideTo)
+end
+
+-- A glide is only meaningful while its hold owns FOV. If the hold vanished, Ease
+-- abandons the glide (no land) rather than fighting whatever now drives FOV --
+-- this replaces the old inline `holdSource == nil` guard in the per-frame step.
+local function IsGlideLive()
+    return holdSource ~= nil
+end
+
+-- The spec handed to Ease. durMs is rewritten per glide (it is per-hold); the
+-- callbacks are fixed, so no per-call closure/table allocation.
+local GLIDE_SPEC = {
+    onStep = OnGlideStep,
+    onLand = OnGlideLand,
+    isLive = IsGlideLive,
+}
 
 -- Begin (or retarget) a glide toward targetFov over durationMs. The start point
 -- is the LIVE FOV, so retargeting an in-flight glide eases from wherever it
@@ -387,22 +383,20 @@ function StartGlide(targetFov, durationMs)
         return false
     end
 
-    -- Cancel any in-flight glide before starting a fresh one, so only one
-    -- updater is ever registered under GLIDE_UPDATE_NAME.
-    StopGlide()
-
     if fromFov == targetFov then
-        -- Already there; nothing to ease. Treat as "no glide needed" so the
-        -- caller pins exactly (cheap and avoids a one-frame updater).
+        -- Already there; nothing to ease. Cancel any in-flight glide and treat as
+        -- "no glide needed" so the caller pins exactly (avoids a one-frame updater).
+        StopGlide()
         return false
     end
 
-    glide.active  = true
-    glide.startMs = GetGameTimeMilliseconds()
-    glide.from    = fromFov
-    glide.to      = targetFov
-    glide.durMs   = durationMs
-
-    EVENT_MANAGER:RegisterForUpdate(GLIDE_UPDATE_NAME, 0, OnGlideUpdate)
+    -- Rewrite the shared endpoints + duration and (re)start the ease. Ease.Start
+    -- retargets in place if one is already running, so only one updater is ever
+    -- registered under GLIDE_UPDATE_NAME.
+    glideFrom     = fromFov
+    glideTo       = targetFov
+    glideDurMs    = durationMs
+    GLIDE_SPEC.durMs = glideDurMs
+    Ease.Start(GLIDE_UPDATE_NAME, GLIDE_SPEC)
     return true
 end

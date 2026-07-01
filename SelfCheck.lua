@@ -154,21 +154,30 @@ end
 -- slots are being captured without being cleared -- a table leak.
 local SLOT_COUNT_WARN = 4
 
--- Orphaned FOV hold: the arbiter is pinning FOV, but the preset controller is
--- back at the default state and so should own nothing. This is the "stuck hold"
--- that previously could only be cleared by the EmergencyRestore panic button.
+-- Orphaned FOV hold: the arbiter is pinning FOV, but its actual owner (looked up
+-- by GetHoldSource rather than assumed to be ContextPresets, so a future hold
+-- source is not silently skipped) is back at its own default state and so should
+-- own nothing. This is the "stuck hold" that previously could only be cleared by
+-- the EmergencyRestore panic button. A hold whose source has no known "default"
+-- state to check against (an unrecognized future source) is reported as-is,
+-- since we cannot confirm it is legitimately owned.
 local function CheckOrphanedFovHold()
     local arbiter = addon.FovArbiter
-    local presets = addon.ContextPresets
-    if not (arbiter and arbiter.IsHeld and presets and presets.GetDiagnostics) then
+    if not (arbiter and arbiter.IsHeld and arbiter.IsHeld()) then
         return nil
     end
 
-    local diag = presets.GetDiagnostics()
-    if arbiter.IsHeld() and diag.activeState == "default" then
-        return GetString(SI_BAV_SELFCHECK_ORPHANED_HOLD)
+    local source = arbiter.GetHoldSource and arbiter.GetHoldSource()
+    local presets = addon.ContextPresets
+    if source == "ContextPresets" and presets and presets.GetDiagnostics then
+        if presets.GetDiagnostics().activeState == "default" then
+            return GetString(SI_BAV_SELFCHECK_ORPHANED_HOLD)
+        end
+        return nil
     end
-    return nil
+
+    -- Unknown/unattributable source: report so it does not slip past silently.
+    return GetString(SI_BAV_SELFCHECK_ORPHANED_HOLD)
 end
 
 -- Snapshot/state coherence: a pre-preset snapshot is captured but the controller
@@ -275,24 +284,6 @@ local function CheckCoalesceLeak()
     return nil
 end
 
--- The options-window flag tracks whether the ESO settings window is open, during
--- which the controller reverts the camera for editing and suspends evaluation. It
--- is cleared on options-close and on disable. If it is still set while the
--- controller is disabled, the flag leaked -- the controller would wrongly believe
--- the menu is up and suppress evaluation if re-enabled.
-local function CheckOptionsOpenLeak()
-    local presets = addon.ContextPresets
-    if not (presets and presets.GetDiagnostics) then
-        return nil
-    end
-
-    local diag = presets.GetDiagnostics()
-    if diag.optionsOpen and not diag.enabled then
-        return GetString(SI_BAV_SELFCHECK_OPTIONS_OPEN_LEAK)
-    end
-    return nil
-end
-
 -- The interaction entry-debounce timer is a one-shot that commits the interaction
 -- state after a brief delay (so quick merchant clicks do not peck the camera). It
 -- unregisters itself when it fires and is cancelled on chatter-end, disable, and
@@ -338,21 +329,6 @@ local function CheckShoulderOwnershipLeak()
     local diag = shoulder.GetDiagnostics()
     if not diag.enabled and (diag.owns or diag.hasBase) then
         return GetString(SI_BAV_SELFCHECK_SHOULDER_OWNERSHIP_LEAK)
-    end
-    return nil
-end
-
--- The options-window flag must clear on close and on disable. Still flagged open
--- while disabled means the flag leaked (the module would wrongly suspend if re-enabled).
-local function CheckShoulderOptionsLeak()
-    local shoulder = addon.ShoulderControl
-    if not (shoulder and shoulder.GetDiagnostics) then
-        return nil
-    end
-
-    local diag = shoulder.GetDiagnostics()
-    if diag.optionsOpen and not diag.enabled then
-        return GetString(SI_BAV_SELFCHECK_SHOULDER_OPTIONS_LEAK)
     end
     return nil
 end
@@ -436,11 +412,9 @@ local INVARIANT_CHECKS = {
     CheckTransitionLeak,
     CheckFovGlideLeak,
     CheckCoalesceLeak,
-    CheckOptionsOpenLeak,
     CheckInteractionEntryLeak,
     CheckShoulderPollLeak,
     CheckShoulderOwnershipLeak,
-    CheckShoulderOptionsLeak,
     CheckVelocityPollLeak,
     CheckVelocityBoostLeak,
     CheckDynamicManualBaseLeak,

@@ -1,6 +1,6 @@
 ## Title: |c6FCB9FBureau|r of Acceptable Views
-## Version: 2.1.29062140
-## AddOnVersion: 2100
+## Version: 2.2.01071418
+## AddOnVersion: 2200
 ## Author: |c6FCB9Fmeshlg|r @ArtieFox
 ## APIVersion: 101050
 ## Description: Free camera zoom between max zoom and first person in restricted states, with optional dynamic FOV, speed-reactive FOV, context presets, and over-the-shoulder swap.
@@ -17,6 +17,8 @@ Localization/$(language).lua
 ; The main addon files are loaded in the following order, with later files overriding earlier ones. This allows for a clear separation of concerns and modularity in the codebase.
 BureauOfAcceptableViews.lua
 CameraSettings.lua
+Ease.lua
+OptionsWatch.lua
 ZoomReconciler.lua
 DynamicFov.lua
 FovArbiter.lua

@@ -38,10 +38,22 @@ local type     = type
 local tonumber = tonumber
 local mathhuge = math.huge
 
--- Engine handles for the temporary transition-glide updater. Bound once at load
--- like DynamicFov does; the updater itself only exists while a glide runs.
-local EVENT_MANAGER           = EVENT_MANAGER
-local GetGameTimeMilliseconds = GetGameTimeMilliseconds
+-- Engine handle for this module's timers (coalesce, interaction-entry, sprint
+-- poll) -- fixed-delay one-shots / polls that register directly. Bound once at
+-- load. The spatial transition GLIDE no longer registers its own updater here --
+-- it runs through the shared Ease primitive (below), which owns the frame timing.
+local EVENT_MANAGER = EVENT_MANAGER
+
+-- The shared easing primitive (Ease.lua) drives the spatial transition glide:
+-- Ease owns register/progress/land/self-tear, this module supplies the payload
+-- (interpolate the glide keys, then defer to the authoritative Apply on land).
+-- Resolved eagerly because Ease loads before ContextPresets in the manifest.
+local Ease = addon.Ease
+
+-- The shared options-window watcher (OptionsWatch.lua): owns the fragment
+-- subscription and the canonical IsOpen() suspend-gate, replacing this module's
+-- own fragment callback + optionsOpen flag. Resolved eagerly (loads earlier).
+local OptionsWatch = addon.OptionsWatch
 
 -- Logging helpers are generated in the core file and exported on private.
 -- Resolve them lazily so load order between files cannot break us.
@@ -154,6 +166,13 @@ function ContextPresets.Apply(preset, isRestore)
                 end
             elseif CameraSettings.Set(key, value) then
                 applied = applied + 1
+                if key == DISTANCE_KEY and addon.ZoomReconciler and addon.ZoomReconciler.SyncIntent then
+                    -- Distance was just written directly, bypassing the FPV-toggle
+                    -- path ZoomReconciler owns. Re-seed its intent to match, so a
+                    -- same-frame probe pair (PvpAlerts/Miat's) arriving afterwards
+                    -- flips relative to THIS distance instead of a stale one.
+                    addon.ZoomReconciler.SyncIntent(value)
+                end
             else
                 failed = failed + 1
             end
@@ -403,11 +422,10 @@ local controller = {
     restoreSlot     = "ContextPresets.controllerRestore",
     polling         = false,
     recovered       = false,   -- load-time snapshot recovery runs once per session
-    -- True while the ESO options window is open. The player may be editing the
-    -- real camera settings (FOV, etc.) there, so while it is up we hand the live
-    -- camera back to its pre-preset snapshot and suspend re-evaluation; on close
-    -- we re-snapshot the (possibly edited) base and re-apply the active state.
-    optionsOpen     = false,
+    -- The "options window is open" suspend-state now lives in the shared
+    -- OptionsWatch (read via OptionsWatch.IsOpen()), not a per-controller flag:
+    -- while it is up we hand the live camera back to the pre-preset snapshot and
+    -- suspend re-evaluation; on close we re-snapshot the edited base and re-apply.
 }
 
 -- The named scratch slot used to stash the player's pre-preset camera. Reusing
@@ -566,66 +584,66 @@ local GLIDE_KEYS = {
 local TRANSITION_UPDATE_NAME = "BAV_ContextPresets_Transition"
 local TRANSITION_DURATION_MS = 250
 
--- All nil/false while no transition is running, so an idle controller carries no
--- glide bookkeeping. active gates the temporary updater; the rest describe the
--- in-flight glide and the authoritative landing target.
-local transition = {
-    active    = false,
-    startMs   = nil,
-    keys      = nil,   -- array of { key=, from=, to= }
-    target    = nil,   -- the target preset, for the final authoritative Apply
-    isRestore = false,
-}
+-- Payload state for the in-flight spatial glide, read by the step/land closures
+-- below. Held as module locals so those closures + the ease spec are built ONCE
+-- (not per transition). keys is the per-transition array of { key, from, to }
+-- (rebuilt each StartTransition since the animated key set varies); target/isRestore
+-- are the authoritative landing arguments OnTransitionLand hands to Apply. "Is a
+-- transition running" is now Ease.IsActive(TRANSITION_UPDATE_NAME), not a flag here.
+local transitionKeys      = nil
+local transitionTarget    = nil
+local transitionIsRestore = false
 
--- Tear down the per-frame updater and clear glide state. Idempotent, so it also
--- serves as the cancel path when a new transition interrupts an in-flight one.
+-- Cancel any in-flight transition glide. Idempotent (Ease.Stop is a no-op when not
+-- running), so it also serves as the cancel path when a new transition interrupts
+-- an in-flight one, and on disable / emergency restore.
 local function StopTransition()
-    if transition.active then
-        EVENT_MANAGER:UnregisterForUpdate(TRANSITION_UPDATE_NAME)
-    end
-    transition.active    = false
-    transition.startMs   = nil
-    transition.keys      = nil
-    transition.target    = nil
-    transition.isRestore = false
+    Ease.Stop(TRANSITION_UPDATE_NAME)
+    transitionKeys      = nil
+    transitionTarget    = nil
+    transitionIsRestore = false
 end
 
 -- Returns true while a transition glide is in progress (read by diagnostics).
 function ContextPresets.IsTransitioning()
-    return transition.active
+    return Ease.IsActive(TRANSITION_UPDATE_NAME)
 end
 
--- Land the transition: clear glide state, then defer to the proven instant Apply
--- so every key (including non-glided ones and FOV) reaches its exact target and
--- FOV ownership is reconciled identically to a non-glided transition.
-local function FinishTransition()
-    local target    = transition.target
-    local isRestore = transition.isRestore
+-- Per-frame step: ease each glide key from its captured start toward the target
+-- over the window. The animated key set is transitionKeys (built per transition in
+-- StartTransition); the exact landing + FOV reconciliation happen in onLand. The
+-- guard is belt-and-braces: Ease only calls this while the ease is live, which is
+-- exactly the window transitionKeys is populated.
+local function OnTransitionStep(t)
+    if transitionKeys == nil then
+        return
+    end
+    for _, g in ipairs(transitionKeys) do
+        CameraSettings.Set(g.key, g.from + (g.to - g.from) * t)
+    end
+end
+
+-- Land the transition: capture the authoritative args, CLEAR glide state first
+-- (so a re-entrant transition started from within Apply -- e.g. a hold's EndHold
+-- reasserting -- sees a clean slate), then defer to the proven instant Apply so
+-- every key (including non-glided ones and FOV) reaches its exact target and FOV
+-- ownership is reconciled identically to a non-glided transition. This is the old
+-- FinishTransition, now driven by Ease on the final frame.
+local function OnTransitionLand()
+    local target    = transitionTarget
+    local isRestore = transitionIsRestore
     StopTransition()
     ContextPresets.Apply(target or {}, isRestore)
 end
 
--- Per-frame step. Eases each glide key from its captured start toward the target
--- over TRANSITION_DURATION_MS; on (or past) the final frame it hands off to
--- FinishTransition, which lands the exact values and stops the updater.
-local function OnTransitionUpdate()
-    if not transition.active or transition.startMs == nil then
-        StopTransition()
-        return
-    end
-
-    local t = (GetGameTimeMilliseconds() - transition.startMs) / TRANSITION_DURATION_MS
-    if t < 0 then t = 0 end
-
-    if t >= 1 then
-        FinishTransition()
-        return
-    end
-
-    for _, g in ipairs(transition.keys) do
-        CameraSettings.Set(g.key, g.from + (g.to - g.from) * t)
-    end
-end
+-- Transition payload, allocated once and reused across transitions (StartTransition
+-- rewrites the module-local endpoints). durMs is fixed for presets, so the whole
+-- spec is a constant.
+local TRANSITION_SPEC = {
+    durMs  = TRANSITION_DURATION_MS,
+    onStep = OnTransitionStep,
+    onLand = OnTransitionLand,
+}
 
 -- Begin (or retarget) a glide toward target. Cancels any in-flight glide first
 -- so an interrupted transition retargets from the LIVE camera rather than a
@@ -651,7 +669,7 @@ local function StartTransition(target, isRestore)
     --     and framing land together instead of FOV snapping ahead.
     --   * restoring the snapshot -> take a TEMPORARY hold purely to own FOV
     --     during the glide (so a zoom tick cannot fight it) and ease toward the
-    --     snapshot's FOV. FinishTransition -> Apply(target, isRestore) writes the
+    --     snapshot's FOV. OnTransitionLand -> Apply(target, isRestore) writes the
     --     exact value; on restore its EndHold then releases this hold (cancelling
     --     the glide) and reasserts dynamic FOV, so FOV still returns to its normal
     --     owner -- just smoothly instead of snapping.
@@ -679,12 +697,14 @@ local function StartTransition(target, isRestore)
         return
     end
 
-    transition.keys      = keys
-    transition.target    = target
-    transition.isRestore = isRestore
-    transition.startMs   = GetGameTimeMilliseconds()
-    transition.active    = true
-    EVENT_MANAGER:RegisterForUpdate(TRANSITION_UPDATE_NAME, 0, OnTransitionUpdate)
+    -- Rewrite the shared endpoints and (re)start the ease over a fresh window.
+    -- StopTransition at the top already cancelled any in-flight glide, so this
+    -- registers cleanly; Ease drives OnTransitionStep each frame and OnTransitionLand
+    -- on the final one (which defers to the authoritative Apply).
+    transitionKeys      = keys
+    transitionTarget    = target
+    transitionIsRestore = isRestore
+    Ease.Start(TRANSITION_UPDATE_NAME, TRANSITION_SPEC)
 end
 
 -- Transition from the current active state to a newly resolved one. Snapshots
@@ -839,7 +859,8 @@ local function Reevaluate()
     -- While the options window is open the camera is intentionally handed back to
     -- the player's snapshot so they can edit the real settings. Don't fight that
     -- by re-applying a state mid-edit; OnOptionsClosed re-evaluates once on close.
-    if controller.optionsOpen then
+    -- Read from the shared OptionsWatch (the single suspend-gate).
+    if OptionsWatch.IsOpen() then
         return
     end
 
@@ -872,7 +893,10 @@ end
 -- ---------------------------------------------------------------------------
 local EVENT_NAMESPACE = "BAV_ContextPresets"
 local SPRINT_POLL_NAME = "BAV_ContextPresets_Sprint"
-local SPRINT_POLL_MS = 150
+-- Shared sprint-poll cadence: read from the core's constants so ContextPresets
+-- and ShoulderControl poll on the exact same interval (no per-module magic
+-- number). Falls back to 150 if constants are somehow unavailable at load.
+local SPRINT_POLL_MS = (private.constants and private.constants.SPRINT_POLL_MS) or 150
 
 -- Generic setter: record a physical state flag and re-evaluate if it flipped.
 local function SetPhysical(stateId, active)
@@ -988,36 +1012,12 @@ end
 -- otherwise we never start the timer, keeping overhead at zero for users who do
 -- not use it.
 --
--- DETECTION: the client exposes no reliable "is sprinting" query. When the
--- LibSprint library is present we read its computed LibSprint.isPlayerSprinting
--- flag -- it detects sprint via action-slot highlighting, so it works regardless
--- of how the player bound sprint (and on gamepad). LibSprint has no callback to
--- subscribe to (only the polled flag), so the timer stays either way; the library
--- only buys a more accurate reading, not the removal of the poll.
---
--- FALLBACK (no LibSprint): read the Shift key (ESO's default sprint bind) via
--- IsShiftKeyDown(), gated on IsPlayerMoving() so holding Shift while standing
--- still does not trigger the sprint preset, AND on the game camera owning input
--- (not IsGameCameraUIModeActive()) so holding Shift while moving in a menu/cursor
--- mode -- inventory, map, the options window -- is not mistaken for sprinting.
--- This still assumes the player kept the default Shift bind; if they rebound
--- sprint (or use Shift for something else), detection will not match. Install
--- LibSprint for bind-agnostic, gamepad-correct detection -- it is the preferred
--- path and is used whenever present.
-local function IsPlayerSprinting()
-    local lib = LibSprint
-    if lib ~= nil and lib.isPlayerSprinting ~= nil then
-        return lib.isPlayerSprinting and true or false
-    end
-    -- Fallback heuristic when LibSprint is not installed.
-    if IsGameCameraUIModeActive and IsGameCameraUIModeActive() then
-        return false
-    end
-    return IsShiftKeyDown() and IsPlayerMoving()
-end
-
+-- Detection itself lives in the core (private.IsPlayerSprinting) so ShoulderControl
+-- samples sprint identically; resolved lazily at poll time so load order cannot
+-- matter. See BureauOfAcceptableViews.lua for the LibSprint / Shift-fallback logic.
 local function PollSprint()
-    SetPhysical(STATE_SPRINT, IsPlayerSprinting())
+    local detect = private.IsPlayerSprinting
+    SetPhysical(STATE_SPRINT, detect ~= nil and detect() or false)
 end
 
 local function StartSprintPolling()
@@ -1076,21 +1076,19 @@ end
 --              the captured snapshot (Apply(snapshot, true): direct write, drops
 --              any FOV hold) so the player sees and edits their REAL settings.
 --              The capture is kept; only the camera is reverted. Re-evaluation is
---              suspended (controller.optionsOpen) so a state change while the menu
+--              suspended (OptionsWatch.IsOpen()) so a state change while the menu
 --              is up cannot re-apply a preset over what they are editing.
 --   * CLOSE -> forget the now-stale snapshot, re-snapshot the (possibly edited)
 --              live camera as the fresh base, then re-resolve and re-apply the
 --              active state on top of it.
 -- The fragment is the options window specifically (not the ESC menu), so this
--- never fires for the in-game system menu.
-local OPTIONS_FRAGMENT = OPTIONS_WINDOW_FRAGMENT
+-- never fires for the in-game system menu. The open/closed lifecycle is owned by
+-- the shared OptionsWatch; these are just the payload. The controller only
+-- subscribes while enabled (SetEnabled), so the old `not controller.enabled`
+-- guards are now structural -- a disabled controller is not subscribed at all.
+local OPTIONS_WATCH_NAME = "ContextPresets"
 
 local function OnOptionsOpened()
-    if not controller.enabled or controller.optionsOpen then
-        return
-    end
-    controller.optionsOpen = true
-
     -- Stop any in-flight transition/coalesce so nothing re-applies a preset while
     -- the player is editing the real settings.
     StopTransition()
@@ -1106,15 +1104,6 @@ local function OnOptionsOpened()
 end
 
 local function OnOptionsClosed()
-    if not controller.optionsOpen then
-        return
-    end
-    controller.optionsOpen = false
-
-    if not controller.enabled then
-        return
-    end
-
     -- The player may have changed the real camera settings. Drop the stale
     -- pre-edit snapshot WITHOUT restoring it (restoring would write the old values
     -- back over the player's fresh edits), then force the active state to be
@@ -1125,30 +1114,6 @@ local function OnOptionsClosed()
     PersistRestoreSnapshot(nil)
     controller.activeState = STATE_DEFAULT
     Reevaluate()
-end
-
--- The options fragment exposes a StateChange callback (shown/hidden). Resolved at
--- registration time and guarded, so a client build without the fragment simply
--- skips the feature instead of erroring.
-local function OnOptionsFragmentStateChange(oldState, newState)
-    if newState == SCENE_FRAGMENT_SHOWN then
-        OnOptionsOpened()
-    elseif newState == SCENE_FRAGMENT_HIDDEN then
-        OnOptionsClosed()
-    end
-end
-
-local function RegisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.RegisterCallback then
-        OPTIONS_FRAGMENT:RegisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-end
-
-local function UnregisterOptionsEvents()
-    if OPTIONS_FRAGMENT and OPTIONS_FRAGMENT.UnregisterCallback then
-        OPTIONS_FRAGMENT:UnregisterCallback("StateChange", OnOptionsFragmentStateChange)
-    end
-    controller.optionsOpen = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -1203,7 +1168,10 @@ local function SetEnabled(enabled)
     if enabled then
         controller.enabled = true
         RegisterStateEvents()
-        RegisterOptionsEvents()
+        OptionsWatch.Subscribe(OPTIONS_WATCH_NAME, {
+            onOpen  = OnOptionsOpened,
+            onClose = OnOptionsClosed,
+        })
         -- Sprint polling only runs when sprint has a non-Off style selected.
         if StyleForState(STATE_SPRINT) ~= STYLE_OFF then
             StartSprintPolling()
@@ -1216,7 +1184,7 @@ local function SetEnabled(enabled)
         -- would start a glide that runs after enabled=false -- wrong UX and a
         -- false "glide while disabled" signal.)
         UnregisterStateEvents()
-        UnregisterOptionsEvents()
+        OptionsWatch.Unsubscribe(OPTIONS_WATCH_NAME)
         StopSprintPolling()
         StopTransition()
         CancelCoalesce()
@@ -1479,7 +1447,8 @@ end
 --   smooth          state transitions are eased (vs. instant snap)
 --   fovGliding      the arbiter's FOV glide updater is currently registered
 --   coalescePending a coalesce timer is armed (a state change is waiting to settle)
---   optionsOpen     the ESO options window is open (camera reverted for editing)
+--   optionsOpen     the ESO options window is open (camera reverted for editing) --
+--                   shared state from OptionsWatch, not a per-module flag
 --   interactionEntryPending  the interaction entry-debounce timer is armed
 function ContextPresets.GetDiagnostics()
     local slotCount = 0
@@ -1494,11 +1463,11 @@ function ContextPresets.GetDiagnostics()
         slotCount          = slotCount,
         sprintPolling      = controller.polling,
         sprintEnabled      = StyleForState(STATE_SPRINT) ~= STYLE_OFF,
-        transitioning      = transition.active,
+        transitioning      = ContextPresets.IsTransitioning(),
         smooth             = controller.smooth,
         fovGliding         = addon.FovArbiter and addon.FovArbiter.IsGliding() or false,
         coalescePending    = coalesce.pending,
-        optionsOpen        = controller.optionsOpen,
+        optionsOpen        = OptionsWatch.IsOpen(),
         interactionEntryPending = interactionEntry.pending,
     }
 end
